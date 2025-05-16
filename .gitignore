@@ -1,0 +1,7 @@
+old/
+scratch.py
+checkpoints/
+datasets/
+__pycache__/
+*.pyc
+.venv/
