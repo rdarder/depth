@@ -10,14 +10,13 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 # Assuming these modules are in the same project structure
-from datasets import (
-    load_and_pair_frames,
-)
+from datasets import load_and_pair_frames
 from predictor import MinimalPredictor
 from pyramid import BaselinePyramid
 
 # --- Configuration ---
 # Match these with the values used for training in train.py
+LOSS_TYPE = "l1"
 CHECKPOINT_PATH = "checkpoints/model_params.npz"
 TRAIN_DATA_DIR = "datasets/frames"  # Directory where your actual processed data is
 IMAGE_H = 64
@@ -33,6 +32,20 @@ PREDICTOR_HIDDEN_FEATURES = 16  # Size of the hidden layer in the predictor
 IMAGE_SIZE = (IMAGE_H, IMAGE_W)  # HxW
 IMAGE_SHAPE_L0 = (1, IMAGE_H, IMAGE_W, 1)  # (batch=1, H, W, C=1)
 
+# Global flag to signal exit from the visualization loop
+exit_visualization = False
+
+
+# Callback function for keyboard events
+def on_key_press(event):
+    """Callback function for keyboard press events in the plot window."""
+    global exit_visualization
+    if event.key == "q":
+        print("Exiting visualization loop...")
+        exit_visualization = True
+    # Close the current figure on any key press to advance the loop
+    plt.close(event.canvas.figure)
+
 
 def load_model_params(params_path: str):
     """Loads model parameters from a .npz file."""
@@ -43,7 +56,9 @@ def load_model_params(params_path: str):
         # Load the numpy arrays
         params_numpy = np.load(params_path, allow_pickle=True)
         # Load the nested dictionary saved under the 'params' key
-        params_dict = params_numpy["params"].item() # Use .item() to get the dictionary from the 0-dim array
+        params_dict = params_numpy[
+            "params"
+        ].item()  # Use .item() to get the dictionary from the 0-dim array
         print(f"Successfully loaded parameters from {params_path}")
         return params_dict
     except Exception as e:
@@ -265,11 +280,35 @@ def main_visualization_loop():
             image2_L0, start2_i_L0_clamped, start2_j_L0_clamped, PATCH_SIZE_FOR_LOSS
         )
 
-        # 6. Visualize
+        # 6. Calculate loss for the extracted patches and determine common vmin/vmax for plotting
+        # Compute the raw L1/L2 difference on the patches and average it.
+
+        # Determine the overall min/max across both patches for consistent visualization
+        patch_min = jnp.min(jnp.stack([patch1, patch2]))
+        patch_max = jnp.max(jnp.stack([patch1, patch2]))
+
+        # Compute the raw L1/L2 difference on the patches and average it.
+        # Need to add a batch dimension of 1 for the loss function which expects (batch, ...)\
+        # Note: We calculate the loss directly on the patches here for display purposes,
+        # matching the core patch comparison logic within compute_photometric_loss.
+        # However, compute_photometric_loss is designed for the whole batch.
+        # A simpler way is to just compute the raw L1/L2 difference on the patches
+        # and average it, matching the patch part of compute_photometric_loss.
+        if LOSS_TYPE == "l1":
+            patch_loss_value = jnp.mean(jnp.abs(patch1 - patch2))
+        elif LOSS_TYPE == "l2":
+            patch_loss_value = jnp.mean(jnp.square(patch1 - patch2))
+        else:
+            # Should match loss_type used in training, but handle unexpected value
+            print(f"Warning: Unsupported loss type '{LOSS_TYPE}' for display.")
+            patch_loss_value = -1  # Indicate calculation issue
+
+        # 7. Visualize
         fig, axes = plt.subplots(2, 2, figsize=(10, 8))
 
         # Plot full images with patches highlighted
-        axes[0, 0].imshow(image1_L0.squeeze(), cmap="gray")
+        # Ensure consistent color scaling for the full images
+        axes[0, 0].imshow(image1_L0.squeeze(), cmap="gray", vmin=0, vmax=1)
         axes[0, 0].set_title("Frame 1 with Patch")
         rect1 = patches.Rectangle(
             (start1_j_L0_clamped, start1_i_L0_clamped),  # (x, y) -> (col, row)
@@ -282,36 +321,101 @@ def main_visualization_loop():
         axes[0, 0].add_patch(rect1)
         axes[0, 0].axis("off")
 
-        axes[0, 1].imshow(image2_L0.squeeze(), cmap="gray")
-        axes[0, 1].set_title("Frame 2 with Predicted Patch Location")
-        rect2 = patches.Rectangle(
+        axes[0, 1].imshow(image2_L0.squeeze(), cmap="gray", vmin=0, vmax=1)
+        axes[0, 1].set_title(
+            f"Frame 2 with flow. Loss ({LOSS_TYPE}): {patch_loss_value:.6f}"
+        )
+
+        # Mark original patch location in Frame 2 (red)
+        # Coordinates are the same as Frame 1 patch location
+        rect2_original = patches.Rectangle(
+            (start1_j_L0_clamped, start1_i_L0_clamped),  # (x, y) -> (col, row)
+            PATCH_SIZE_FOR_LOSS,
+            PATCH_SIZE_FOR_LOSS,
+            linewidth=1,
+            edgecolor="red",
+            facecolor="none",
+            label="Original Location",  # Add label for legend
+        )
+        axes[0, 1].add_patch(rect2_original)
+
+        # Mark predicted patch location in Frame 2 (green)
+        rect2_predicted = patches.Rectangle(
             (start2_j_L0_clamped, start2_i_L0_clamped),  # (x, y) -> (col, row)
             PATCH_SIZE_FOR_LOSS,
             PATCH_SIZE_FOR_LOSS,
             linewidth=1,
-            edgecolor="r",
+            edgecolor="green",  # Changed to green
             facecolor="none",
+            label="Predicted Location",  # Add label for legend
         )
-        axes[0, 1].add_patch(rect2)
+        axes[0, 1].add_patch(rect2_predicted)
+
+        # Add arrow for predicted flow vector
+        # Start from the center of the original location, end at the center of the predicted location
+        # Matplotlib arrow(x, y, dx, dy)
+        arrow_start_x = center1_j_L0  # Column
+        arrow_start_y = center1_i_L0  # Row
+        arrow_end_x = predicted_center2_j_L0
+        arrow_end_y = predicted_center2_i_L0
+        arrow_dx = arrow_end_x - arrow_start_x
+        arrow_dy = arrow_end_y - arrow_start_y
+
+        axes[0, 1].arrow(
+            arrow_start_x,
+            arrow_start_y,
+            arrow_dx,
+            arrow_dy,
+            head_width=max(
+                1, PATCH_SIZE_FOR_LOSS / 4
+            ),  # Make arrow head size reasonable
+            head_length=max(1, PATCH_SIZE_FOR_LOSS / 4),
+            fc="cyan",
+            ec="cyan",
+            length_includes_head=True,
+        )
+
+        # Add text annotation for flow vector (dx, dy)
+        # Position text near the start of the arrow or patch
+        axes[0, 1].text(
+            arrow_start_x,
+            arrow_start_y - patch_half_size - 2,  # Position slightly above the patch
+            f"({flow_vector_pred[1]:.2f}, {flow_vector_pred[0]:.2f})",  # (dx, dy) -> (j, i)
+            color="cyan",
+            fontsize=8,
+            ha="center",
+            va="bottom",
+        )
+
+        # Add legend to frame 2 plot
+        axes[0, 1].legend(loc="upper right")
+
         axes[0, 1].axis("off")
 
         # Plot extracted patches
-        axes[1, 0].imshow(patch1.squeeze(), cmap="gray")
-        axes[1, 0].set_title("Extracted Patch from Frame 1")
+        # Ensure consistent color scaling for the patches
+        axes[1, 0].imshow(patch1.squeeze(), cmap="gray", vmin=patch_min, vmax=patch_max)
+        axes[1, 0].set_title("Predicted path at frame 1")
         axes[1, 0].axis("off")
 
-        axes[1, 1].imshow(patch2.squeeze(), cmap="gray")
-        axes[1, 1].set_title("Patch from Frame 2 at Predicted Location")
+        axes[1, 1].imshow(patch2.squeeze(), cmap="gray", vmin=patch_min, vmax=patch_max)
+        axes[1, 1].set_title("Predicted patch at frame 2")
         axes[1, 1].axis("off")
 
-        plt.tight_layout()
+        # Add text annotation for the patch loss
+        # fig.suptitle(
+        #     f"Patch Loss ({LOSS_TYPE}): {patch_loss_value:.6f}", fontsize=12, y=1.02
+        # )  # Add title above plots
+
+        fig.tight_layout(
+            rect=[0, 0, 1, 0.98]
+        )  # Adjust layout to make space for suptitle
+
+        fig.canvas.mpl_connect("key_press_event", on_key_press)
+
         plt.show()
 
-        # 7. Ask user if they want to continue
-        user_input = input(
-            "Press Enter to visualize another pair, or type 'q' to quit: "
-        )
-        if user_input.lower() == "q":
+        if exit_visualization:
             break
 
 
