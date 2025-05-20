@@ -4,7 +4,7 @@ import jax
 import jax.numpy as jnp
 from numpy.testing import assert_allclose, assert_array_equal
 
-from hierarchy import get_box_score, upscale_and_expand_flattened_coords
+from upscale import get_box_score, upscale_and_expand_flattened_coords
 
 
 class TestBox(unittest.TestCase):
