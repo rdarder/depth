@@ -5,3 +5,5 @@ datasets/
 __pycache__/
 *.pyc
 .venv/
+datasets_dummy/
+tensorboard_logs/
