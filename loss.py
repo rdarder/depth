@@ -1,45 +1,38 @@
+# def get_patch_coordinates(
+#     H: int, W: int, r_center: jax.Array, c_center: jax.Array, patch_size: int
+# ):
+#     """
+#     Calculates top-left coordinates for dynamic_slice given center coordinates.
+#     Also returns valid mask for patches that are fully within image.
+#     (For initial simple version, we might not use mask and just clip/rely on dynamic_slice behavior)
+#     """
+#     patch_radius = patch_size // 2
+#     # Calculate top-left for dynamic_slice
+#     # We need to ensure start indices are non-negative.
+#     # And that r_center + patch_radius < H, c_center + patch_radius < W
+#     # For dynamic_slice, the start indices are r_center - patch_radius
+#     start_r = r_center - patch_radius
+#     start_c = c_center - patch_radius
+#     # Simple clipping for start_indices for dynamic_slice
+#     # More robust handling might be needed if patches can go way off image
+#     # dynamic_slice expects start_indices to be within [0, dim_size - slice_size]
+#     # However, if we pad the image, this becomes simpler.
+#     # For now, let's assume we'll clip coordinates passed to dynamic_slice
+#     # so that the *centers* are valid, and rely on dynamic_slice to handle edges if needed.
+#     # Or, better, clip the *start_indices* so dynamic_slice is always valid.
+#     # Start indices for dynamic_slice should be within [0, dim_size - patch_size]
+#     # Let's adjust based on this for now.
+#     # This is a bit tricky without padding.
+#     # An easier way for initial step is to pad the image.
+#     # Returning center coords for now, actual slicing will be in vmapped function
+#     return r_center, c_center
+import flax.nnx as nnx
 import jax
 import jax.numpy as jnp
-import flax.nnx as nnx
-from pyramid import BaselinePyramid
-from predictor import MinimalPredictor
+
 from incremental import hierarchical_flow_estimation
-
-
-
-def get_patch_coordinates(
-    H: int, W: int, r_center: jax.Array, c_center: jax.Array, patch_size: int
-):
-    """
-    Calculates top-left coordinates for dynamic_slice given center coordinates.
-    Also returns valid mask for patches that are fully within image.
-    (For initial simple version, we might not use mask and just clip/rely on dynamic_slice behavior)
-    """
-    patch_radius = patch_size // 2
-
-    # Calculate top-left for dynamic_slice
-    # We need to ensure start indices are non-negative.
-    # And that r_center + patch_radius < H, c_center + patch_radius < W
-    # For dynamic_slice, the start indices are r_center - patch_radius
-
-    start_r = r_center - patch_radius
-    start_c = c_center - patch_radius
-
-    # Simple clipping for start_indices for dynamic_slice
-    # More robust handling might be needed if patches can go way off image
-    # dynamic_slice expects start_indices to be within [0, dim_size - slice_size]
-    # However, if we pad the image, this becomes simpler.
-    # For now, let's assume we'll clip coordinates passed to dynamic_slice
-    # so that the *centers* are valid, and rely on dynamic_slice to handle edges if needed.
-    # Or, better, clip the *start_indices* so dynamic_slice is always valid.
-
-    # Start indices for dynamic_slice should be within [0, dim_size - patch_size]
-    # Let's adjust based on this for now.
-    # This is a bit tricky without padding.
-    # An easier way for initial step is to pad the image.
-
-    # Returning center coords for now, actual slicing will be in vmapped function
-    return r_center, c_center
+from predictor import MinimalPredictor
+from pyramid import BaselinePyramid
 
 
 def extract_patches_vectorized(
@@ -98,7 +91,7 @@ def extract_patches_vectorized(
 def compute_photometric_loss(
     frame1_original: jax.Array,  # [B, H_0, W_0, 1]
     frame2_original: jax.Array,  # [B, H_0, W_0, 1]
-    predicted_flow_level0: jax.Array,  # [B, H_0, W_0, 2]
+    predicted_flow_level0: jax.Array,  # [B, H_0/2, W_0/2, 2]
     patch_size: int,
     loss_type: str = "l1",
 ) -> jax.Array:
@@ -107,31 +100,26 @@ def compute_photometric_loss(
     Uses rounded coordinates for warping (no interpolation for P2).
     """
     B, H0, W0, C = frame1_original.shape
+    _, HP, WP, _ = predicted_flow_level0.shape
     assert C == 1  # Expect grayscale
+    assert HP == H0 // 2
+    assert WP == W0 // 2
 
     # Create a grid of all (b, r, c) locations for dense loss
     batch_coords, r_coords_grid, c_coords_grid = jnp.meshgrid(
         jnp.arange(B),
-        jnp.arange(H0),  # All r coordinates
-        jnp.arange(W0),  # All c coordinates
+        jnp.arange(H0, step=2),  # All r coordinates
+        jnp.arange(W0, step=2),  # All c coordinates
         indexing="ij",
     )
 
     # Flatten to get lists of coordinates for vmapping
     b_indices_flat = batch_coords.flatten()  # [B*H0*W0]
-    r_centers_flat = r_coords_grid.flatten().astype(jnp.int32)  # [B*H0*W0]
-    c_centers_flat = c_coords_grid.flatten().astype(jnp.int32)  # [B*H0*W0]
+    r_indices_flat = r_coords_grid.flatten().astype(jnp.int32)  # [B*H0*W0]
+    c_indices_flat = c_coords_grid.flatten().astype(jnp.int32)  # [B*H0*W0]
 
-    # 1. Extract patches P1 from frame1_original
-    # Clip centers to ensure patch_radius away from border for simple extraction
-    # This effectively means we don't compute loss right at the border pixels
-    # if patch_size > 1. A more robust way is padding.
-    # For dynamic_slice, r_centers can be [0, H0-1], c_centers [0, W0-1]
-    # and the clipping of start_indices in extract_patches_vectorized handles it.
-
-    # For P1, centers are just the grid r_centers_flat, c_centers_flat
     patches_p1 = extract_patches_vectorized(
-        frame1_original, b_indices_flat, r_centers_flat, c_centers_flat, patch_size
+        frame1_original, b_indices_flat, r_indices_flat, c_indices_flat, patch_size
     )
 
     # 2. Calculate warped coordinates for P2
