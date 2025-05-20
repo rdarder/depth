@@ -9,7 +9,7 @@ import tensorflow as tf  # For tf.data pipeline
 from flax.metrics import tensorboard
 
 from datasets import create_dataset, get_consecutive_frame_pairs
-from flow import OpticalFlow, loss_fn_for_grad
+from flow_model import OpticalFlow, loss_fn_for_grad
 
 # --- Training Configuration ---
 LEARNING_RATE = 1e-4
