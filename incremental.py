@@ -1,24 +1,27 @@
-from functools import partial
-
+import flax.nnx as nnx
 import jax
 import jax.numpy as jnp
-import flax.nnx as nnx
-from pyramid import BaselinePyramid
-from predictor import MinimalPredictor
 
-@partial(jax.jit, static_argnums=(2,3))
+from predictor import MinimalPredictor
+from pyramid import BaselinePyramid
+
+
 def hierarchical_flow_estimation(
-    frame1_features_pyramid: list[jax.Array], # Coarsest first (idx 0) to finest (idx num_levels-1)
-    frame2_features_pyramid: list[jax.Array], # Coarsest first (idx 0) to finest (idx num_levels-1)
-    predictor_module: MinimalPredictor, # Or actual MinimalPredictorNNX
-    num_levels: int
+    frame1_features_pyramid: list[
+        jax.Array
+    ],  # Coarsest first (idx 0) to finest (idx num_levels-1)
+    frame2_features_pyramid: list[
+        jax.Array
+    ],  # Coarsest first (idx 0) to finest (idx num_levels-1)
+    predictor_module: MinimalPredictor,  # Or actual MinimalPredictorNNX
+    num_levels: int,
 ):
     """
     Estimates dense optical flow hierarchically from coarse to fine.
 
     Args:
         frame1_features_pyramid: List of [B, H_l, W_l, C_feat] features for frame 1,
-                                 ordered from coarsest (index 0) to finest (index num_levels-1).
+                                 ordered from coarsest (index num_levels-1) to finest (0).
         frame2_features_pyramid: List of [B, H_l, W_l, C_feat] features for frame 2,
                                  ordered similarly.
         predictor_module: The learned motion predictor module.
@@ -28,22 +31,20 @@ def hierarchical_flow_estimation(
                           the estimated flow at the finest level resolution.
     """
     # Initial batch size and finest level dimensions
-    B = frame1_features_pyramid[-1].shape[0]
-    H_0 = frame1_features_pyramid[-1].shape[1]
-    W_0 = frame1_features_pyramid[-1].shape[2]
+    B = frame1_features_pyramid[0].shape[0]
+    H_0 = frame1_features_pyramid[0].shape[1]
+    W_0 = frame1_features_pyramid[0].shape[2]
 
-    # Initialize loop state at the coarsest level (pyramid index 0)
-    F1_coarsest = frame1_features_pyramid[0]
+    # Initialize loop state at the coarsest level (pyramid index -1)
+    F1_coarsest = frame1_features_pyramid[-1]
     _, H_coarsest, W_coarsest, _ = F1_coarsest.shape
 
     # Create initial grid of points for the coarsest level
     # (batch_idx, r_idx, c_idx)
     batch_coords, r_coords, c_coords = jnp.meshgrid(
-        jnp.arange(B),
-        jnp.arange(H_coarsest),
-        jnp.arange(W_coarsest),
-        indexing='ij'
+        jnp.arange(B), jnp.arange(H_coarsest), jnp.arange(W_coarsest), indexing="ij"
     )
+
     loop_batch_indices = batch_coords.flatten()
     loop_r_coords = r_coords.flatten().astype(jnp.int32)
     loop_c_coords = c_coords.flatten().astype(jnp.int32)
@@ -52,10 +53,10 @@ def hierarchical_flow_estimation(
     loop_accumulated_flow = jnp.zeros((num_initial_points, 2), dtype=jnp.float32)
 
     # Loop from coarsest (L_idx=0) to finest (L_idx=num_levels-1)
-    for L_idx in range(num_levels):
+    for L_idx in range(num_levels - 1, -1, -1):
         F1_L = frame1_features_pyramid[L_idx]
         F2_L = frame2_features_pyramid[L_idx]
-        _, H_L, W_L, _ = F1_L.shape # Current level dimensions
+        _, H_L, W_L, _ = F1_L.shape  # Current level dimensions
 
         # 1. Calculate predictor prior (subpixel part of accumulated flow)
         integer_part_of_accum_flow = jnp.round(loop_accumulated_flow)
@@ -74,8 +75,12 @@ def hierarchical_flow_estimation(
 
         # 3. Warp and Gather F2 features
         # Warped coordinates are relative to the F1 grid points
-        warped_r_float = loop_r_coords.astype(jnp.float32) + integer_part_of_accum_flow[:, 1] # uy
-        warped_c_float = loop_c_coords.astype(jnp.float32) + integer_part_of_accum_flow[:, 0] # ux
+        warped_r_float = (
+            loop_r_coords.astype(jnp.float32) + integer_part_of_accum_flow[:, 1]
+        )  # uy
+        warped_c_float = (
+            loop_c_coords.astype(jnp.float32) + integer_part_of_accum_flow[:, 0]
+        )  # ux
 
         # Round and clip warped coordinates for F2 sampling
         warped_r_int = jnp.clip(jnp.round(warped_r_float).astype(jnp.int32), 0, H_L - 1)
@@ -83,7 +88,9 @@ def hierarchical_flow_estimation(
         gathered_f2 = F2_L[loop_batch_indices, warped_r_int, warped_c_int, :]
 
         # 4. Form predictor input
-        predictor_input = jnp.concatenate([gathered_f1, gathered_f2, predictor_prior], axis=-1)
+        predictor_input = jnp.concatenate(
+            [gathered_f1, gathered_f2, predictor_prior], axis=-1
+        )
 
         # 5. Predict delta flow
         delta_flow = predictor_module(predictor_input)
@@ -92,10 +99,12 @@ def hierarchical_flow_estimation(
         flow_increment_at_level = predictor_prior + delta_flow
 
         # 7. Update total accumulated flow (at current level L's scale)
-        current_total_flow_L_scale = integer_part_of_accum_flow + flow_increment_at_level
+        current_total_flow_L_scale = (
+            integer_part_of_accum_flow + flow_increment_at_level
+        )
 
         # 8. If not the finest level, prepare for the next (finer) level
-        if L_idx < num_levels - 1:
+        if L_idx > 0:
             num_points_at_L = loop_batch_indices.shape[0]
 
             next_loop_batch_indices = jnp.repeat(loop_batch_indices, 4, axis=0)
@@ -109,13 +118,17 @@ def hierarchical_flow_estimation(
             r_offsets = jnp.array([0, 1, 0, 1], dtype=jnp.int32)
             c_offsets = jnp.array([0, 0, 1, 1], dtype=jnp.int32)
 
-            next_loop_r_coords = jnp.tile(r_offsets, num_points_at_L) + \
-                                 jnp.repeat(base_r_next, 4, axis=0)
-            next_loop_c_coords = jnp.tile(c_offsets, num_points_at_L) + \
-                                 jnp.repeat(base_c_next, 4, axis=0)
+            next_loop_r_coords = jnp.tile(r_offsets, num_points_at_L) + jnp.repeat(
+                base_r_next, 4, axis=0
+            )
+            next_loop_c_coords = jnp.tile(c_offsets, num_points_at_L) + jnp.repeat(
+                base_c_next, 4, axis=0
+            )
 
             # Scale up the accumulated flow values for the finer level's coordinate system
-            next_loop_accumulated_flow = jnp.repeat(current_total_flow_L_scale, 4, axis=0) * 2.0
+            next_loop_accumulated_flow = (
+                jnp.repeat(current_total_flow_L_scale, 4, axis=0) * 2.0
+            )
 
             # Update loop variables for the next iteration
             loop_batch_indices = next_loop_batch_indices
@@ -126,26 +139,31 @@ def hierarchical_flow_estimation(
             # This is the finest level (L_idx == num_levels - 1)
             # current_total_flow_L_scale is the final flow for the processed locations
             # loop_batch_indices, loop_r_coords, loop_c_coords define these locations
-            pass # Final values are already computed
+            pass  # Final values are already computed
 
     # After the loop, reconstruct the dense flow field at original resolution (H_0, W_0)
     # loop_batch_indices, loop_r_coords, loop_c_coords are now for level 0 (finest)
     # current_total_flow_L_scale contains the flow values for these points
 
     final_dense_flow = jnp.zeros((B, H_0, W_0, 2), dtype=jnp.float32)
-    final_dense_flow = final_dense_flow.at[loop_batch_indices, loop_r_coords, loop_c_coords].set(current_total_flow_L_scale)
+    final_dense_flow = final_dense_flow.at[
+        loop_batch_indices, loop_r_coords, loop_c_coords
+    ].set(current_total_flow_L_scale)
 
     return final_dense_flow
 
+
 # Example Usage:
-if __name__ == '__main__':
+if __name__ == "__main__":
     key = jax.random.PRNGKey(0)
-    rngs_pyramid = nnx.Rngs(params=key) # Dummy, not used by dummy pyramid
-    rngs_predictor = nnx.Rngs(params=jax.random.PRNGKey(1)) # Dummy
+    rngs_pyramid = nnx.Rngs(params=key)  # Dummy, not used by dummy pyramid
+    rngs_predictor = nnx.Rngs(params=jax.random.PRNGKey(1))  # Dummy
 
     # Create dummy pyramid and predictor
     num_pyr_levels = 3
-    dummy_pyramid_builder = BaselinePyramid(num_levels=num_pyr_levels, rngs=rngs_pyramid)
+    dummy_pyramid_builder = BaselinePyramid(
+        num_levels=num_pyr_levels, rngs=rngs_pyramid
+    )
     dummy_predictor = MinimalPredictor(rngs=rngs_predictor)
 
     # Create dummy input frames
@@ -155,7 +173,9 @@ if __name__ == '__main__':
     img_h0, img_w0 = 32, 32
     batch_size = 1
     dummy_frame1 = jnp.zeros((batch_size, img_h0, img_w0, 1), dtype=jnp.float32)
-    dummy_frame2 = jnp.ones((batch_size, img_h0, img_w0, 1), dtype=jnp.float32) # Shifted frame
+    dummy_frame2 = jnp.ones(
+        (batch_size, img_h0, img_w0, 1), dtype=jnp.float32
+    )  # Shifted frame
 
     # Generate feature pyramids (coarsest first)
     # The dummy pyramid returns them coarsest-first if I reverse it.
@@ -163,7 +183,7 @@ if __name__ == '__main__':
     # The dummy pyramid code was: return list(reversed(pyramid)) # Coarsest first
     # This means pyramid_f1[0] is coarsest, pyramid_f1[num_levels-1] is finest.
 
-    pyramid_f1_raw = dummy_pyramid_builder(dummy_frame1) # finest to coarsest
+    pyramid_f1_raw = dummy_pyramid_builder(dummy_frame1)  # finest to coarsest
     pyramid_f2_raw = dummy_pyramid_builder(dummy_frame2)
 
     # The hierarchical_flow_estimation expects coarsest first.
@@ -171,16 +191,15 @@ if __name__ == '__main__':
     # Check dummy pyramid: `pyramid.append(level_output)` (finest first), then `list(reversed(pyramid))`
     # So, pyramid_f1_raw[0] is coarsest. This is correct for the loop.
 
-    print(f"Pyramid features (coarsest first):")
+    print("Pyramid features (coarsest first):")
     for i in range(num_pyr_levels):
-        print(f"  Level {i} (from coarse): F1 shape {pyramid_f1_raw[i].shape}, F2 shape {pyramid_f2_raw[i].shape}")
+        print(
+            f"  Level {i} (from coarse): F1 shape {pyramid_f1_raw[i].shape}, F2 shape {pyramid_f2_raw[i].shape}"
+        )
 
     # Estimate flow
     estimated_flow = hierarchical_flow_estimation(
-        pyramid_f1_raw,
-        pyramid_f2_raw,
-        dummy_predictor,
-        num_pyr_levels
+        pyramid_f1_raw, pyramid_f2_raw, dummy_predictor, num_pyr_levels
     )
 
     print(f"\nEstimated dense flow shape: {estimated_flow.shape}")
@@ -191,7 +210,9 @@ if __name__ == '__main__':
 
     # Test with a predictor that does something:
     class ShiftingPredictor(nnx.Module):
-        def __init__(self, *, rngs: nnx.Rngs | None = None): pass
+        def __init__(self, *, rngs: nnx.Rngs | None = None):
+            pass
+
         def __call__(self, inputs: jax.Array) -> jax.Array:
             # inputs are [..., f1_0:4, f2_0:4, prior_0:2]
             prior = inputs[..., 8:10]
@@ -201,19 +222,17 @@ if __name__ == '__main__':
 
     shifting_predictor = ShiftingPredictor()
     estimated_flow_shifting = hierarchical_flow_estimation(
-        pyramid_f1_raw,
-        pyramid_f2_raw,
-        shifting_predictor,
-        num_pyr_levels
+        pyramid_f1_raw, pyramid_f2_raw, shifting_predictor, num_pyr_levels
     )
-    print(f"\nWith shifting predictor:")
+    print("\nWith shifting predictor:")
     print(f"Estimated dense flow shape: {estimated_flow_shifting.shape}")
     # Expected flow:
     # L2 (coarsest, 8x8): prior=0, delta=0.1. total_L_scale = 0 + (0+0.1) = 0.1. accum_for_L1 = 0.1*2 = 0.2
     # L1 (16x16): accum=0.2. prior=0.2-0=0.2. delta=0.1-0.2 = -0.1. total_L_scale = 0 + (0.2-0.1) = 0.1. accum_for_L0 = 0.1*2=0.2
     # L0 (32x32): accum=0.2. prior=0.2. delta=-0.1. total_L_scale = 0 + (0.2-0.1) = 0.1.
     # So final flow should be 0.1 everywhere.
-    print(f"Example flow values (first point): {estimated_flow_shifting[0,0,0,:]}")
+    print(f"Example flow values (first point): {estimated_flow_shifting[0, 0, 0, :]}")
+    print(f"all flow estimation values: {estimated_flow_shifting}")
     print(f"Sum of absolute flow values: {jnp.sum(jnp.abs(estimated_flow_shifting))}")
     # Expected sum for 0.1: B * H0 * W0 * 2 * 0.1 = 1 * 32 * 32 * 2 * 0.1 = 204.8
     # My logic trace above implies final flow of 0.1. Let's re-trace the ShiftingPredictor.
