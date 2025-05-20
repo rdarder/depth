@@ -5,31 +5,6 @@ import jax.lax
 import jax.numpy as jnp
 
 
-def get_box_score(coordinates: jax.Array, box: jax.Array):
-    """Returns whether or not each coordinate fits inside a given box.
-    The coordinates can be int or float.
-    The box is expected to be int. Regardless, it does an inclusive min and exclusive max.
-    """
-    # coordinates: [B, N, 2]
-    # box: [2, 2]
-    # box: [y_min, x_min], [y_max, x_max]
-
-    min_limits = box[0, :]
-    max_limits = box[1, :]
-    gte_min_per_channel = jnp.greater_equal(coordinates, min_limits)
-    lt_max_per_channel = jnp.less(coordinates, max_limits)
-    separate_coordinate_inside_box = jnp.logical_and(
-        gte_min_per_channel, lt_max_per_channel
-    )
-    return jnp.all(separate_coordinate_inside_box, axis=-1)
-
-
-# @partial(jax.jit, static_argnames=("k", "recall_target"))
-def get_top_k_indices(array: jax.Array, k: int, recall_target=0.95):
-    _, indices = jax.lax.approx_max_k(array, k, recall_target=recall_target)
-    return indices
-
-
 def upscale_and_expand_flattened_coords(
     coarse_f1_coordinates: jax.Array,  # Shape: [B, N, 2] (int)
     coarse_flow: jax.Array,  # Shape: [B, N, 2] (float)
@@ -150,3 +125,28 @@ def upscale_and_expand_flattened_coords(
         kept_coarse_f1,
         kept_coarse_f2,
     )
+
+
+def get_box_score(coordinates: jax.Array, box: jax.Array):
+    """Returns whether or not each coordinate fits inside a given box.
+    The coordinates can be int or float.
+    The box is expected to be int. Regardless, it does an inclusive min and exclusive max.
+    """
+    # coordinates: [B, N, 2]
+    # box: [2, 2]
+    # box: [y_min, x_min], [y_max, x_max]
+
+    min_limits = box[0, :]
+    max_limits = box[1, :]
+    gte_min_per_channel = jnp.greater_equal(coordinates, min_limits)
+    lt_max_per_channel = jnp.less(coordinates, max_limits)
+    separate_coordinate_inside_box = jnp.logical_and(
+        gte_min_per_channel, lt_max_per_channel
+    )
+    return jnp.all(separate_coordinate_inside_box, axis=-1)
+
+
+# @partial(jax.jit, static_argnames=("k", "recall_target"))
+def get_top_k_indices(array: jax.Array, k: int, recall_target=0.95):
+    _, indices = jax.lax.approx_max_k(array, k, recall_target=recall_target)
+    return indices
