@@ -22,7 +22,7 @@ PREDICTOR_HIDDEN_FEATURES = 32
 PATCH_SIZE_LOSS = 5
 PATCH_SIZE_PYRAMID = 5
 PYRAMID_CHANNELS = 8
-LOG_EVERY_N_STEPS = 2000
+LOG_EVERY_N_STEPS = 100
 TENSORBOARD_LOG_DIR = "./tensorboard_logs"
 MODEL_SAVE_DIR = "./saved_models"
 
@@ -31,6 +31,7 @@ DATASET_DIR = "datasets/frames"  # or your actual dataset path
 IMAGE_EXTENSION = ".png"
 TARGET_IMG_HEIGHT = 64  # Example, make sure divisible for pyramid
 TARGET_IMG_WIDTH = 64  # Example
+FLOW_REGULARIZATION_WEIGHT = 2.0  # You might need to tune this value
 
 
 def initialize_model_and_optimizer(key: jax.random.PRNGKey, learning_rate: float):
@@ -60,20 +61,27 @@ def initialize_model_and_optimizer(key: jax.random.PRNGKey, learning_rate: float
 partial
 
 
-@partial(nnx.jit, static_argnums=(4))  # JIT compile the training step
+@partial(nnx.jit, static_argnums=(4, 5))  # JIT compile the training step
 def train_step(
     model: OpticalFlow,
     optimizer: nnx.Optimizer,
     batch_frame1: jax.Array,
     batch_frame2: jax.Array,
-    patch_size_loss: int,
+    loss_patch_size: int,
+    flow_regularization_weight: float,
 ):
     """Performs a single training step."""
     # Compute loss and gradients.
     # `nnx.value_and_grad` handles NNX modules correctly.
     # It returns grads for variables of type nnx.Param by default.
     grad_fn = nnx.value_and_grad(model_loss, argnums=0)  # Grad w.r.t. model (arg 0)
-    loss_value, grads = grad_fn(model, batch_frame1, batch_frame2, patch_size_loss)
+    loss_value, grads = grad_fn(
+        model,
+        batch_frame1,
+        batch_frame2,
+        loss_patch_size,
+        flow_regularization_weight=flow_regularization_weight,
+    )
 
     # Update model parameters using the optimizer
     optimizer.update(grads)  # nnx.Optimizer updates the model's params in-place
@@ -89,7 +97,7 @@ def train_step(
 def train_model():
     """Main training loop."""
     # Ensure reproducibility / manage randomness
-    main_key = jax.random.PRNGKey(42)
+    main_key = jax.random.PRNGKey(100)
     init_key, data_key = jax.random.split(main_key)
 
     # Initialize model and optimizer
@@ -135,7 +143,12 @@ def train_model():
             # Note: JIT expects static shapes. tf.data with drop_remainder=True helps.
             # Our dummy dataset always yields full batches.
             model, optimizer, loss, grads = train_step(
-                model, optimizer, batch_f1, batch_f2, PATCH_SIZE_LOSS
+                model,
+                optimizer,
+                batch_f1,
+                batch_f2,
+                PATCH_SIZE_LOSS,
+                FLOW_REGULARIZATION_WEIGHT,
             )
 
             if global_step % LOG_EVERY_N_STEPS == 0:

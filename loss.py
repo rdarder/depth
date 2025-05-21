@@ -244,10 +244,11 @@ def model_loss(
     batch_frame2: jax.Array,
     patch_size: int,
     priors: Optional[jax.Array] = None,
+    flow_regularization_weight: float = 1e-5,
 ):
     """Computes the loss for gradient calculation."""
     # Forward pass through the main model
-    f1_pyramid, f2_pyramid, predicted_flow = model(
+    f1_pyramid, f2_pyramid, estimations = model(
         batch_frame1, batch_frame2, priors=priors
     )
     levels = len(f1_pyramid)
@@ -258,12 +259,16 @@ def model_loss(
         batch_frame2
     ]
 
+    last_level_flow = estimations["flow_with_confidence"][-1][:, :, :2]
+    avg_flow = jnp.average(last_level_flow**2)
+
     # Compute photometric loss
-    loss = photometric_loss(
+    photo_loss = photometric_loss(
         f1_source,
         f2_source,
-        predicted_flow,
+        estimations,
         patch_size=patch_size,
     )
+    flow_regularization_loss = avg_flow * flow_regularization_weight
 
-    return loss
+    return photo_loss + flow_regularization_loss
