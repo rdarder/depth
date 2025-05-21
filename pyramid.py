@@ -11,7 +11,15 @@ class BaselinePyramid(nnx.Module):
     Generates a sequence of feature maps at decreasing resolutions.
     """
 
-    def __init__(self, num_levels: int, out_channels: int = 4, *, rngs: nnx.Rngs):
+    def __init__(
+        self,
+        patch_size: int = 3,
+        strides: int = 2,
+        num_levels: int = 4,
+        out_channels: int = 4,
+        *,
+        rngs: nnx.Rngs,
+    ):
         # Standard practice to pass rngs
         self.num_levels = num_levels
         # Define the shared convolution layer. Parameters are initialized here.
@@ -20,8 +28,8 @@ class BaselinePyramid(nnx.Module):
         self.shared_conv = nnx.Conv(
             in_features=1,
             out_features=out_channels,
-            kernel_size=(3, 3),
-            strides=2,
+            kernel_size=(patch_size, patch_size),
+            strides=strides,
             padding="SAME",  # Or 'VALID', depending on desired behaviour at edges
             # kernel_init=nnx.initializers.lecun_normal(), # Example initializer
             # bias_init=nnx.initializers.zeros(), # Example initializer

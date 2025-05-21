@@ -20,6 +20,8 @@ BATCH_SIZE = 10  # Should match dataset batch size
 NUM_PYRAMID_LEVELS = 4
 PREDICTOR_HIDDEN_FEATURES = 32
 PATCH_SIZE_LOSS = 3
+PATCH_SIZE_PYRAMID = 5
+PYRAMID_CHANNELS = 5
 LOG_EVERY_N_STEPS = 500
 TENSORBOARD_LOG_DIR = "./tensorboard_logs"
 MODEL_SAVE_DIR = "./saved_models"
@@ -41,7 +43,9 @@ def initialize_model_and_optimizer(key: jax.random.PRNGKey, learning_rate: float
     # For simple nnx.Param, just one key is often fine.
     model = OpticalFlow(
         num_pyramid_levels=NUM_PYRAMID_LEVELS,
+        pyramid_patch_size=PATCH_SIZE_PYRAMID,
         predictor_hidden_features=PREDICTOR_HIDDEN_FEATURES,
+        pyramid_output_channels=PYRAMID_CHANNELS,
         rngs=nnx.Rngs(params=model_key),  # Pass Rngs for parameter initialization
     )
 

@@ -13,16 +13,20 @@ class OpticalFlow(nnx.Module):
     def __init__(
         self,
         num_pyramid_levels: int = 4,
-        conv_output_channels: int = 4,
+        pyramid_patch_size: int = 3,
+        pyramid_output_channels: int = 4,
         predictor_hidden_features: int = 32,
         *,
         rngs: nnx.Rngs,
     ):
         self.pyramid = BaselinePyramid(
-            num_levels=num_pyramid_levels, out_channels=conv_output_channels, rngs=rngs
+            patch_size=pyramid_patch_size,
+            num_levels=num_pyramid_levels,
+            out_channels=pyramid_output_channels,
+            rngs=rngs,
         )
         self.predictor = MinimalPredictor(
-            input_features=conv_output_channels * 2 + 2,
+            input_features=pyramid_output_channels * 2 + 2,
             hidden_features=predictor_hidden_features,
             rngs=rngs,
         )
