@@ -16,11 +16,11 @@ from loss import model_loss
 # --- Training Configuration ---
 LEARNING_RATE = 1e-4
 NUM_EPOCHS = 50
-BATCH_SIZE = 4  # Should match dataset batch size
+BATCH_SIZE = 10  # Should match dataset batch size
 NUM_PYRAMID_LEVELS = 4
 PREDICTOR_HIDDEN_FEATURES = 32
 PATCH_SIZE_LOSS = 3
-LOG_EVERY_N_STEPS = 1000
+LOG_EVERY_N_STEPS = 500
 TENSORBOARD_LOG_DIR = "./tensorboard_logs"
 MODEL_SAVE_DIR = "./saved_models"
 
@@ -140,7 +140,7 @@ def train_model():
                 )
                 with summary_writer.as_default():
                     tf.summary.scalar("train_loss", loss, global_step)
-                    log_gradients_to_tensorboard(grads, model, global_step)
+                    # log_gradients_to_tensorboard(grads, model, global_step)
                 summary_writer.flush()
 
                 # You can add similar logging for predictor weights

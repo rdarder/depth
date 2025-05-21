@@ -21,14 +21,14 @@ def upscale_and_expand_flattened_coords(
         select_top = N
     assert select_top <= N
     assert coarse_f1_coordinates.dtype == jnp.int32
-    assert coarse_f2_coordinates.dtype == jnp.int32
+    assert coarse_f2_coordinates.dtype == jnp.float32
     assert coarse_size.dtype == jnp.int32
     assert coarse_size.shape == (2,)
     assert fine_focus_box.dtype == jnp.int32
     assert fine_focus_box.shape == (2, 2)
 
     coarse_flow, confidence = jnp.split(coarse_flow_with_confidence, [2], axis=-1)
-    flowed_f2 = coarse_f2_coordinates + coarse_flow  # [B, N, 2] # float
+    flowed_f2 = jnp.round(coarse_f2_coordinates) + coarse_flow  # [B, N, 2] # float
     upscaled_flowed_f2 = flowed_f2 * 2  # [B, N, 2] # float
     upscaled_f1 = coarse_f1_coordinates * 2  # [B, N, 2] # int
     rounded_upscaled_flowed_f2 = jnp.round(upscaled_flowed_f2).astype(
@@ -47,8 +47,8 @@ def upscale_and_expand_flattened_coords(
         kept_coords_indices = get_top_k_indices(exclusion_score, select_top)
         kept_coords_indices = jnp.expand_dims(kept_coords_indices, axis=-1)
 
-        kept_rounded_upscaled_flowed_f2 = jnp.take_along_axis(
-            rounded_upscaled_flowed_f2, kept_coords_indices, axis=1
+        kept_upscaled_flowed_f2 = jnp.take_along_axis(
+            upscaled_flowed_f2, kept_coords_indices, axis=1
         )
         kept_upscaled_f1 = jnp.take_along_axis(upscaled_f1, kept_coords_indices, axis=1)
         # print(kept_rounded_upscaled_flowed_f2_coords)
@@ -63,16 +63,11 @@ def upscale_and_expand_flattened_coords(
             coarse_f1_coordinates, kept_coords_indices, axis=1
         )
 
-        kept_coarse_f2 = jnp.take_along_axis(
-            coarse_f2_coordinates, kept_coords_indices, axis=1
-        )
-
     else:
         kept_upscaled_f1 = upscaled_f1
-        kept_rounded_upscaled_flowed_f2 = rounded_upscaled_flowed_f2
+        kept_upscaled_flowed_f2 = upscaled_flowed_f2
         kept_upscaled_f2_priors = upscaled_f2_priors
         kept_coarse_f1 = coarse_f1_coordinates
-        kept_coarse_f2 = coarse_f2_coordinates
 
     # 3. Expand the prior to the 4*N output points
     # [B, N, 2] -> [B, N, 1, 2] -> [B, N, 4, 2] (repeat) -> [B, N*4, 2] (reshape)
@@ -81,8 +76,8 @@ def upscale_and_expand_flattened_coords(
     )  # [B, 4*N, 2]
 
     # 4. Generate coordinates for the 2x2 fine grid cells for each of the N input points
-    expanded_kept_rounded_upscaled_flowed_f2 = jnp.repeat(
-        kept_rounded_upscaled_flowed_f2, repeats=4, axis=1
+    expanded_kept_upscaled_flowed_f2 = jnp.repeat(
+        kept_upscaled_flowed_f2, repeats=4, axis=1
     )  # [B, 4*N, 2]
 
     expanded_kept_upscaled_f1 = jnp.repeat(kept_upscaled_f1, repeats=4, axis=1)
@@ -102,8 +97,8 @@ def upscale_and_expand_flattened_coords(
     # This will broadcast over B if B > 1.
 
     # Add offsets to the expanded base coordinates
-    offset_expanded_kept_rounded_upscaled_flowed_f2 = (
-        expanded_kept_rounded_upscaled_flowed_f2 + batched_tiled_pixel_offsets
+    offset_expanded_kept_upscaled_flowed_f2 = (
+        expanded_kept_upscaled_flowed_f2 + batched_tiled_pixel_offsets
     )
     offset_expanded_kept_upscaled_f1 = (
         expanded_kept_upscaled_f1 + batched_tiled_pixel_offsets
@@ -111,8 +106,8 @@ def upscale_and_expand_flattened_coords(
     # Shape: [B, 4*N, 2]
     #
 
-    clipped_offset_expanded_kept_rounded_upscaled_flowed_f2 = jnp.clip(
-        offset_expanded_kept_rounded_upscaled_flowed_f2,
+    clipped_offset_expanded_kept_upscaled_flowed_f2 = jnp.clip(
+        offset_expanded_kept_upscaled_flowed_f2,
         jnp.zeros(2, dtype=jnp.int32),
         2 * coarse_size - 1,
     )
@@ -120,10 +115,10 @@ def upscale_and_expand_flattened_coords(
     # Shape: [B, 4*N, 2]
     return (
         offset_expanded_kept_upscaled_f1,
-        clipped_offset_expanded_kept_rounded_upscaled_flowed_f2,
+        clipped_offset_expanded_kept_upscaled_flowed_f2,
         expanded_upscaled_f2_priors,
         kept_coarse_f1,
-        kept_coarse_f2,
+        upscaled_flowed_f2,
     )
 
 

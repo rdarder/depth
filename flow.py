@@ -26,7 +26,7 @@ def estimate_flow_at_level(
     assert f1_coords.shape == priors.shape
     B, H, W, C = f1.shape
     f1_selected = gather_frame_values(f1, f1_coords)
-    f2_selected = gather_frame_values(f2, f2_coords)
+    f2_selected = gather_frame_values(f2, jnp.round(f2_coords).astype(jnp.int32))
     assert f1_selected.shape[:2] == priors.shape[:2]
     flow_with_confidence = predictor(f1_selected, f2_selected, priors)
     batched_flow_with_confidence = flow_with_confidence.reshape(B, -1, 3)
@@ -61,15 +61,15 @@ def estimate_flow_incrementally(
     assert frame1.shape == frame2.shape
     assert priors.shape == (B, H * W, 2)
 
-    f1_coords = f2_coords = get_full_coordinates_grid(
-        coarse_shape
-    )  # only on coarse level
+    f1_coords = get_full_coordinates_grid(coarse_shape)  # only on coarse level
+    f2_coords = f1_coords.astype(jnp.float32)
 
     f1_coords_trace = [f1_coords]
     f2_coords_trace = [f2_coords]
     f1_kept_coords_trace = []
     f2_kept_coords_trace = []
     residual_flow_confidence_trace = []
+    priors_trace = []
 
     for level, (f1, f2) in enumerate(zip(f1_pyramid, f2_pyramid)):
         residual_flow_with_confidence = estimate_flow_at_level(
@@ -94,6 +94,7 @@ def estimate_flow_incrementally(
         f2_kept_coords_trace.append(kept_f2_coords)
         f1_coords_trace.append(f1_coords)
         f2_coords_trace.append(f2_coords)
+        priors_trace.append(priors)
         residual_flow_confidence_trace.append(residual_flow_with_confidence)
 
     return dict(
@@ -102,4 +103,5 @@ def estimate_flow_incrementally(
         f1_kept=f1_kept_coords_trace,
         f2_kept=f2_kept_coords_trace,
         flow_with_confidence=residual_flow_confidence_trace,
+        residual_priors=priors_trace,
     )
