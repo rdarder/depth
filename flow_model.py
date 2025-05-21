@@ -1,23 +1,36 @@
+from typing import Optional
+
 import flax.nnx as nnx
 import jax
+import jax.numpy as jnp
 
-from incremental import hierarchical_flow_estimation
-from loss import compute_photometric_loss
+from flow import estimate_flow_incrementally
 from predictor import MinimalPredictor
 from pyramid import BaselinePyramid
 
 
 class OpticalFlow(nnx.Module):
     def __init__(
-        self, num_pyramid_levels: int, predictor_hidden_features: int, *, rngs: nnx.Rngs
+        self,
+        num_pyramid_levels: int = 4,
+        conv_output_channels: int = 4,
+        predictor_hidden_features: int = 32,
+        *,
+        rngs: nnx.Rngs,
     ):
-        self.pyramid = BaselinePyramid(num_levels=num_pyramid_levels, rngs=rngs)
-        self.predictor = MinimalPredictor(
-            hidden_features=predictor_hidden_features, rngs=rngs
+        self.pyramid = BaselinePyramid(
+            num_levels=num_pyramid_levels, out_channels=conv_output_channels, rngs=rngs
         )
-        self.num_pyramid_levels = num_pyramid_levels
+        self.predictor = MinimalPredictor(
+            input_features=conv_output_channels * 2 + 2,
+            hidden_features=predictor_hidden_features,
+            rngs=rngs,
+        )
+        # self.num_pyramid_levels = num_pyramid_levels
 
-    def __call__(self, frame1: jax.Array, frame2: jax.Array) -> jax.Array:
+    def __call__(
+        self, frame1: jax.Array, frame2: jax.Array, priors: Optional[jax.Array]
+    ) -> jax.Array:
         """
         Performs full optical flow estimation.
         Args:
@@ -26,35 +39,18 @@ class OpticalFlow(nnx.Module):
         Returns:
             predicted_flow_level0: Flow at the finest level [B, H, W, 2]
         """
-        frame1_features = self.pyramid(frame1)
-        frame2_features = self.pyramid(frame2)
-
-        predicted_flow_level0 = hierarchical_flow_estimation(
-            frame1_features,
-            frame2_features,
-            self.predictor,  # Pass the predictor instance
-            self.num_pyramid_levels,
+        assert frame1.shape == frame2.shape
+        f1_pyramid = self.pyramid(frame1)
+        f2_pyramid = self.pyramid(frame2)
+        B, H, W, C = f1_pyramid[0].shape
+        if priors is None:
+            priors = jnp.zeros((B, H * W, 2))
+        assert priors.shape == (B, H * W, 2)
+        assert priors.dtype == jnp.float32
+        return (
+            f1_pyramid,
+            f2_pyramid,
+            estimate_flow_incrementally(
+                self.predictor, frame1, frame2, f1_pyramid, f2_pyramid, priors
+            ),
         )
-        return predicted_flow_level0
-
-
-def loss_fn_for_grad(
-    model: OpticalFlow,
-    batch_frame1: jax.Array,
-    batch_frame2: jax.Array,
-    patch_size: int,
-):
-    """Computes the loss for gradient calculation."""
-    # Forward pass through the main model
-    predicted_flow = model(batch_frame1, batch_frame2)
-
-    # Compute photometric loss
-    loss = compute_photometric_loss(
-        batch_frame1,
-        batch_frame2,
-        predicted_flow,
-        patch_size=patch_size,
-        loss_type="l1",  # Or 'l2'
-    )
-
-    return loss

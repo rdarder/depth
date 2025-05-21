@@ -7,13 +7,12 @@ import jax.numpy as jnp
 
 def upscale_and_expand_flattened_coords(
     coarse_f1_coordinates: jax.Array,  # Shape: [B, N, 2] (int)
-    coarse_flow: jax.Array,  # Shape: [B, N, 2] (float)
     coarse_f2_coordinates: jax.Array,  # Shape: [B, N, 2] (int)
-    confidence: jax.Array,  # Shape: [B, N] (float)
+    coarse_flow_with_confidence: jax.Array,  # Shape: [B, N, 3] (float)
     fine_focus_box: jax.Array,  # Shape [2,2] (int)
     coarse_size: jax.Array,  # Shape [2] (int)
     select_top: Optional[int],
-) -> tuple[jax.Array, jax.Array, jax.Array]:
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
     B, N, D = coarse_f2_coordinates.shape
 
     assert coarse_f1_coordinates.shape == coarse_f2_coordinates.shape
@@ -28,6 +27,7 @@ def upscale_and_expand_flattened_coords(
     assert fine_focus_box.dtype == jnp.int32
     assert fine_focus_box.shape == (2, 2)
 
+    coarse_flow, confidence = jnp.split(coarse_flow_with_confidence, [2], axis=-1)
     flowed_f2 = coarse_f2_coordinates + coarse_flow  # [B, N, 2] # float
     upscaled_flowed_f2 = flowed_f2 * 2  # [B, N, 2] # float
     upscaled_f1 = coarse_f1_coordinates * 2  # [B, N, 2] # int

@@ -11,7 +11,9 @@ class MinimalPredictor(nnx.Module):
     plus a 2D flow prior, and predicts a 2D flow residual.
     """
 
-    def __init__(self, hidden_features: int = 32, *, rngs: nnx.Rngs):
+    def __init__(
+        self, input_features: int = 10, hidden_features: int = 32, *, rngs: nnx.Rngs
+    ):
         # Input features:
         #   4 from frame1 features
         # + 4 from frame2 features
@@ -20,17 +22,19 @@ class MinimalPredictor(nnx.Module):
         #
         # Output features: 2 (delta_ux, delta_uy) - a residual to the prior
         self.dense1 = nnx.Linear(
-            in_features=10,  # Updated input dimension
+            in_features=input_features,  # Updated input dimension
             out_features=hidden_features,
             rngs=rngs,
         )
         self.dense2 = nnx.Linear(
             in_features=hidden_features,
-            out_features=2,  # Outputting a 2D residual
+            out_features=3,  # 2D residual flow, 1D confidence
             rngs=rngs,
         )
 
-    def __call__(self, inputs: jax.Array) -> jax.Array:
+    def __call__(
+        self, f1: jax.Array, f2: jax.Array, priors: jax.Array
+    ) -> tuple[jax.Array, jax.Array]:
         """
         Applies the MLP prediction.
 
@@ -40,12 +44,14 @@ class MinimalPredictor(nnx.Module):
                     The last 2 elements of the 10 are (prior_ux, prior_uy).
 
         Returns:
-            Predicted flow residuals (delta_ux, delta_uy), shape [B', 2].
+            Predicted flow residuals (delta_ux, delta_uy) and confidence shape [B', 3].
         """
+        inputs = jnp.concatenate([f1, f2, priors], axis=-1)
         x = self.dense1(inputs)
         x = jax.nn.relu(x)
-        residuals = self.dense2(x)
-        return residuals
+        flow_with_confidence = self.dense2(x)
+        flow, confidence = jnp.split(flow_with_confidence, [2], axis=-1)
+        return flow_with_confidence
 
 
 def sample_usage():

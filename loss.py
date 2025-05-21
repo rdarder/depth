@@ -1,235 +1,146 @@
-# def get_patch_coordinates(
-#     H: int, W: int, r_center: jax.Array, c_center: jax.Array, patch_size: int
-# ):
-#     """
-#     Calculates top-left coordinates for dynamic_slice given center coordinates.
-#     Also returns valid mask for patches that are fully within image.
-#     (For initial simple version, we might not use mask and just clip/rely on dynamic_slice behavior)
-#     """
-#     patch_radius = patch_size // 2
-#     # Calculate top-left for dynamic_slice
-#     # We need to ensure start indices are non-negative.
-#     # And that r_center + patch_radius < H, c_center + patch_radius < W
-#     # For dynamic_slice, the start indices are r_center - patch_radius
-#     start_r = r_center - patch_radius
-#     start_c = c_center - patch_radius
-#     # Simple clipping for start_indices for dynamic_slice
-#     # More robust handling might be needed if patches can go way off image
-#     # dynamic_slice expects start_indices to be within [0, dim_size - slice_size]
-#     # However, if we pad the image, this becomes simpler.
-#     # For now, let's assume we'll clip coordinates passed to dynamic_slice
-#     # so that the *centers* are valid, and rely on dynamic_slice to handle edges if needed.
-#     # Or, better, clip the *start_indices* so dynamic_slice is always valid.
-#     # Start indices for dynamic_slice should be within [0, dim_size - patch_size]
-#     # Let's adjust based on this for now.
-#     # This is a bit tricky without padding.
-#     # An easier way for initial step is to pad the image.
-#     # Returning center coords for now, actual slicing will be in vmapped function
-#     return r_center, c_center
-import flax.nnx as nnx
+from typing import Optional
+
 import jax
 import jax.numpy as jnp
 
-from incremental import hierarchical_flow_estimation
-from predictor import MinimalPredictor
-from pyramid import BaselinePyramid
+from flow_model import OpticalFlow
 
 
-def extract_patches_vectorized(
-    image_batch: jax.Array,  # [B, H, W, C]
-    batch_indices: jax.Array,  # [N_patches]
-    r_centers: jax.Array,  # [N_patches]
-    c_centers: jax.Array,  # [N_patches]
-    patch_size: int,
-) -> jax.Array:  # [N_patches, patch_size, patch_size, C]
+def get_patch_overflow_mask(
+    patch_coords: jax.Array, height: int, width: int, patch_size: int
+):
+    max_valid_row = height - patch_size
+    max_valid_col = width - patch_size
+    r = patch_coords[:, :, 0]
+    c = patch_coords[:, :, 1]
+    return (r <= max_valid_row) & (c <= max_valid_col)
+
+
+def get_batched_patches(
+    source: jax.Array, coords: jax.Array, patch_size: int
+) -> jax.Array:
     """
-    Extracts patches using jax.lax.dynamic_slice, vectorized over patches.
-    Assumes r_centers, c_centers are already clipped to valid *center* ranges.
+    Extracts patches from a batch of source arrays at specified batched coordinates.
+
+    Assumes source has shape (B, H, W, ...) and coords has shape (B, N, 2).
+    Does NOT check for out-of-bounds coordinates.
+
+    Args:
+        source: The source JAX array batch. Shape (B, H, W, ...).
+        coords: A batch of (row, column) coordinates. Shape (B, N, 2).
+        patch_size: The size of the square patch to extract.
+
+    Returns:
+        A JAX array containing the extracted patches for all batch elements
+        and all coordinates. Shape (B, N, patch_size, patch_size, ...).
+        The trailing dimensions (...) will match those of the source array (e.g., C).
     """
-    B, H, W, C = image_batch.shape
-    patch_radius = patch_size // 2
 
-    # Calculate top-left corner for dynamic_slice
-    # These r_starts and c_starts are the crucial inputs for dynamic_slice
-    r_starts = r_centers - patch_radius
-    c_starts = c_centers - patch_radius
+    def _get_single_patch(source_arr, single_coord, size):
+        start_indices_rc = single_coord.astype(jnp.int32)
+        num_spatial_dims = 2
+        num_feature_dims = source_arr.ndim - num_spatial_dims
+        start_indices_features = jnp.zeros(num_feature_dims, dtype=jnp.int32)
+        start_indices = jnp.concatenate([start_indices_rc, start_indices_features])
+        slice_sizes_spatial = (size, size)
+        slice_sizes_features = source_arr.shape[num_spatial_dims:]
+        slice_sizes = slice_sizes_spatial + slice_sizes_features
+        slice_sizes_tuple = tuple(slice_sizes)
+        return jax.lax.dynamic_slice(source_arr, start_indices, slice_sizes_tuple)
 
-    # Clip start coordinates to ensure the slice itself is valid
-    # dynamic_slice requires: 0 <= start_index <= dim_size - slice_size
-    r_starts_clipped = jnp.clip(r_starts, 0, H - patch_size)
-    c_starts_clipped = jnp.clip(c_starts, 0, W - patch_size)
-
-    # We need to vmap the slicing operation.
-    # jax.lax.dynamic_slice(operand, start_indices, slice_sizes)
-    # operand is image_batch[b_idx]
-    # start_indices is (r_start_clipped, c_start_clipped, 0) for channel
-    # slice_sizes is (patch_size, patch_size, C)
-
-    def _slice_one_patch(image_single_batch, r_start, c_start):
-        # image_single_batch: [H, W, C]
-        # r_start, c_start: scalar
-        return jax.lax.dynamic_slice(
-            image_single_batch,
-            (r_start, c_start, 0),  # start_indices for H, W, C
-            (patch_size, patch_size, C),  # slice_sizes for H, W, C
+    def _process_single_batch_element(source_single, coords_single, size):
+        get_patches_for_single_image = jax.vmap(
+            _get_single_patch, in_axes=(None, 0, None)
         )
+        return get_patches_for_single_image(
+            source_single, coords_single, size
+        )  # Output shape: (N, patch_size, patch_size, ...)
 
-    # To vmap this, we need to vmap over (image_batch[b_idx], r_starts_clipped, c_starts_clipped)
-    # This is slightly tricky because of the batch_indices.
-    # An alternative is to vmap over a per-patch function that indexes into the batch.
-
-    # Let's make a vmappable function that takes b, r_start, c_start
-    def _slice_for_vmap(b_idx, r_start_clipped, c_start_clipped):
-        return _slice_one_patch(image_batch[b_idx], r_start_clipped, c_start_clipped)
-
-    all_patches = jax.vmap(_slice_for_vmap)(
-        batch_indices, r_starts_clipped, c_starts_clipped
+    get_batched_patches_vmapped = jax.vmap(
+        _process_single_batch_element, in_axes=(0, 0, None)
     )
-    return all_patches
+    patches = get_batched_patches_vmapped(source, coords, patch_size)
+    return patches
 
 
-def compute_photometric_loss(
-    frame1_original: jax.Array,  # [B, H_0, W_0, 1]
-    frame2_original: jax.Array,  # [B, H_0, W_0, 1]
-    predicted_flow_level0: jax.Array,  # [B, H_0/2, W_0/2, 2]
+def photometric_loss_for_level(
+    frame1: jax.Array,  # [B, 2*H, 2*W, 1]
+    frame2: jax.Array,  # [B, 2*H, 2*W, 1]
+    f1_coords,
+    f2_coords,
+    flow_with_confidence: jax.Array,  # [B, H, W, 3]
     patch_size: int,
-    loss_type: str = "l1",
 ) -> jax.Array:
     """
     Computes photometric loss between frame1 and warped frame2 at Level 0.
     Uses rounded coordinates for warping (no interpolation for P2).
     """
-    B, H0, W0, C = frame1_original.shape
-    _, HP, WP, _ = predicted_flow_level0.shape
+    B, HF, WF, C = frame1.shape
     assert C == 1  # Expect grayscale
-    assert HP == H0 // 2
-    assert WP == W0 // 2
+    assert f1_coords.shape == f2_coords.shape
+    assert f1_coords.shape[:2] == flow_with_confidence.shape[:2]
+    f1_overflow_mask = get_patch_overflow_mask(f1_coords, HF, WF, patch_size)
+    f2_overflow_mask = get_patch_overflow_mask(f2_coords, HF, WF, patch_size)
+    overflow_mask = f1_overflow_mask & f2_overflow_mask
+    f1_patches = get_batched_patches(frame1, f1_coords, patch_size)
+    f2_patches = get_batched_patches(frame2, f1_coords, patch_size)
+    patch_losses = jnp.abs(f1_patches - f2_patches)
+    per_patch_loss = jnp.mean(patch_losses, axis=(2, 3, 4))
+    masked_loss = jnp.where(overflow_mask, per_patch_loss, 0)
+    in_frame = jnp.count_nonzero(overflow_mask)
+    loss = jnp.sum(masked_loss)
+    return in_frame, loss
 
-    # Create a grid of all (b, r, c) locations for dense loss
-    batch_coords, r_coords_grid, c_coords_grid = jnp.meshgrid(
-        jnp.arange(B),
-        jnp.arange(H0, step=2),  # All r coordinates
-        jnp.arange(W0, step=2),  # All c coordinates
-        indexing="ij",
+
+def photometric_loss(f1_pyramid, f2_pyramid, estimations, patch_size):
+    coarsest_frame = f1_pyramid[0]
+    B, H, W, C = coarsest_frame.shape
+    sum_loss = jnp.array([0.0])
+    sum_in_frame = jnp.array([0])
+    for level in range(len(f1_pyramid)):
+        f1_coords = estimations["f1_kept"][level] * 2
+        f2_coords = estimations["f2_kept"][level] * 2
+        level_in_frame, level_loss = photometric_loss_for_level(
+            frame1=f1_pyramid[level],
+            frame2=f2_pyramid[level],
+            f1_coords=f1_coords,
+            f2_coords=f2_coords,
+            flow_with_confidence=estimations["flow_with_confidence"][level],
+            patch_size=patch_size,
+        )
+        sum_loss = sum_loss + level_loss
+        sum_in_frame = sum_in_frame + level_in_frame
+
+    loss = sum_loss / jnp.clip(sum_in_frame, 1)
+    return loss[0]
+
+
+def model_loss(
+    model: OpticalFlow,
+    batch_frame1: jax.Array,
+    batch_frame2: jax.Array,
+    patch_size: int,
+    priors: Optional[jax.Array] = None,
+):
+    """Computes the loss for gradient calculation."""
+    # Forward pass through the main model
+    f1_pyramid, f2_pyramid, predicted_flow = model(
+        batch_frame1, batch_frame2, priors=priors
+    )
+    levels = len(f1_pyramid)
+    f1_source = [conv_output[:, :, :, :1] for conv_output in f1_pyramid[1:levels]] + [
+        batch_frame1
+    ]
+    f2_source = [conv_output[:, :, :, :1] for conv_output in f2_pyramid[1:levels]] + [
+        batch_frame2
+    ]
+
+    # Compute photometric loss
+    loss = photometric_loss(
+        f1_source,
+        f2_source,
+        predicted_flow,
+        patch_size=patch_size,
     )
 
-    # Flatten to get lists of coordinates for vmapping
-    b_indices_flat = batch_coords.flatten()  # [B*H0*W0]
-    r_indices_flat = r_coords_grid.flatten().astype(jnp.int32)  # [B*H0*W0]
-    c_indices_flat = c_coords_grid.flatten().astype(jnp.int32)  # [B*H0*W0]
-
-    patches_p1 = extract_patches_vectorized(
-        frame1_original, b_indices_flat, r_indices_flat, c_indices_flat, patch_size
-    )
-
-    # 2. Calculate warped coordinates for P2
-    flow_at_locs = predicted_flow_level0[
-        b_indices_flat, r_centers_flat, c_centers_flat, :
-    ]  # [B*H0*W0, 2]
-
-    target_r_f2_float = (
-        r_centers_flat.astype(jnp.float32) + flow_at_locs[:, 1]
-    )  # flow_uy
-    target_c_f2_float = (
-        c_centers_flat.astype(jnp.float32) + flow_at_locs[:, 0]
-    )  # flow_ux
-
-    rounded_target_r_f2 = jnp.round(target_r_f2_float).astype(jnp.int32)
-    rounded_target_c_f2 = jnp.round(target_c_f2_float).astype(jnp.int32)
-
-    # Clip these rounded *center* coordinates before passing to extract_patches_vectorized
-    # to ensure centers are within [0, Dim-1]
-    clipped_rounded_target_r_f2 = jnp.clip(rounded_target_r_f2, 0, H0 - 1)
-    clipped_rounded_target_c_f2 = jnp.clip(rounded_target_c_f2, 0, W0 - 1)
-
-    # Extract patches P2 from frame2_original using these warped & rounded coordinates
-    patches_p2 = extract_patches_vectorized(
-        frame2_original,
-        b_indices_flat,
-        clipped_rounded_target_r_f2,
-        clipped_rounded_target_c_f2,
-        patch_size,
-    )
-
-    # 3. Calculate loss
-    patch_diff = patches_p1 - patches_p2  # [N_total_patches, patch_size, patch_size, 1]
-
-    if loss_type == "l1":
-        loss_values = jnp.abs(patch_diff)
-    elif loss_type == "l2":
-        loss_values = jnp.square(patch_diff)
-    else:
-        raise ValueError(f"Unsupported loss_type: {loss_type}")
-
-    # Average loss over patch pixels, then over all patches in the batch
-    loss_per_patch = jnp.mean(
-        loss_values, axis=(1, 2, 3)
-    )  # Avg over H_patch, W_patch, C_patch
-    total_loss = jnp.mean(loss_per_patch)  # Avg over all patches
-
-    return total_loss
-
-
-# Example Usage (requires dummy hierarchical_flow_estimation and its support modules)
-if __name__ == "__main__":
-    # Re-use dummy setup from previous hierarchical_flow_estimation example
-    key = jax.random.PRNGKey(0)
-    rngs_pyramid = nnx.Rngs(params=key)
-    rngs_predictor = nnx.Rngs(params=jax.random.PRNGKey(1))
-
-    num_pyr_levels = 3
-    img_h0, img_w0 = 32, 32  # Must be divisible by 2^(num_pyr_levels-1)
-    batch_size = 2
-
-    dummy_pyramid_builder = BaselinePyramid(
-        num_levels=num_pyr_levels, rngs=rngs_pyramid
-    )
-    dummy_predictor = MinimalPredictor(rngs=rngs_predictor)
-
-    frame1 = jnp.arange(batch_size * img_h0 * img_w0 * 1, dtype=jnp.float32).reshape(
-        batch_size, img_h0, img_w0, 1
-    ) / (batch_size * img_h0 * img_w0)
-    # Frame2 is Frame1 shifted by (1,1) pixel ideally, and with some value changes
-    frame2 = jnp.roll(frame1, shift=(0, 1, 1, 0), axis=(0, 1, 2, 3)) + 0.1
-    frame2 = jnp.clip(frame2, 0, 1.0)
-
-    pyramid_f1 = dummy_pyramid_builder(frame1)
-    pyramid_f2 = dummy_pyramid_builder(frame2)
-
-    predicted_flow = hierarchical_flow_estimation(
-        pyramid_f1, pyramid_f2, dummy_predictor, num_pyr_levels
-    )
-
-    print(f"Frame1 shape: {frame1.shape}")
-    print(f"Frame2 shape: {frame2.shape}")
-    print(f"Predicted flow shape: {predicted_flow.shape}")
-
-    patch_s = 5
-    loss_l1 = compute_photometric_loss(
-        frame1, frame2, predicted_flow, patch_size=patch_s, loss_type="l1"
-    )
-    loss_l2 = compute_photometric_loss(
-        frame1, frame2, predicted_flow, patch_size=patch_s, loss_type="l2"
-    )
-
-    print(f"L1 Loss (patch {patch_s}x{patch_s}): {loss_l1}")
-    print(f"L2 Loss (patch {patch_s}x{patch_s}): {loss_l2}")
-
-    # Test with a known flow: if flow is (1,1) and frame2 is frame1 shifted by (1,1)
-    # then loss should be small (due to +0.1 in frame2)
-    # If predictor outputs zero flow, it means P2 is taken from unshifted frame2.
-    # P1 from frame1 at (r,c), P2 from frame2 at (r,c)
-    # Since frame2 is frame1 shifted by (1,1) + 0.1, P2 from (r,c) is like P1 from (r-1, c-1) + 0.1
-    # This will result in some non-zero loss.
-
-    # If predicted_flow was exactly the true shift (e.g., all ones if shift is (1,1))
-    # then P2 would be sampled from frame2 at (r+1, c+1).
-    # frame2[b, r+1, c+1] = frame1[b, r, c] + 0.1
-    # So patch_diff would be approx -0.1. L1 loss per pixel ~0.1.
-
-    known_flow_true_shift = jnp.ones_like(predicted_flow)  # Assuming (dx=1, dy=1)
-    loss_l1_known_flow = compute_photometric_loss(
-        frame1, frame2, known_flow_true_shift, patch_size=patch_s, loss_type="l1"
-    )
-    print(f"L1 Loss with 'true' (1,1) flow: {loss_l1_known_flow}")
-    # Expected: approx 0.1 because frame2 = roll(frame1) + 0.1
+    return loss

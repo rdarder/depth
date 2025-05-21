@@ -1,24 +1,26 @@
 import os
 import time
+from functools import partial
 
 import flax.nnx as nnx
 import jax
 import jax.numpy as jnp
 import optax
 import tensorflow as tf  # For tf.data pipeline
-from flax.metrics import tensorboard
+from jax.tree_util import tree_map_with_path
 
 from datasets import create_dataset, get_consecutive_frame_pairs
-from flow_model import OpticalFlow, loss_fn_for_grad
+from flow_model import OpticalFlow
+from loss import model_loss
 
 # --- Training Configuration ---
 LEARNING_RATE = 1e-4
-NUM_EPOCHS = 200
+NUM_EPOCHS = 50
 BATCH_SIZE = 4  # Should match dataset batch size
-NUM_PYRAMID_LEVELS = 3
+NUM_PYRAMID_LEVELS = 4
 PREDICTOR_HIDDEN_FEATURES = 32
-PATCH_SIZE_LOSS = 5
-LOG_EVERY_N_STEPS = 200
+PATCH_SIZE_LOSS = 3
+LOG_EVERY_N_STEPS = 1000
 TENSORBOARD_LOG_DIR = "./tensorboard_logs"
 MODEL_SAVE_DIR = "./saved_models"
 
@@ -51,7 +53,10 @@ def initialize_model_and_optimizer(key: jax.random.PRNGKey, learning_rate: float
     return model, optimizer
 
 
-# @partial(nnx.jit, static_argnums=(4))  # JIT compile the training step
+partial
+
+
+@partial(nnx.jit, static_argnums=(4))  # JIT compile the training step
 def train_step(
     model: OpticalFlow,
     optimizer: nnx.Optimizer,
@@ -63,9 +68,7 @@ def train_step(
     # Compute loss and gradients.
     # `nnx.value_and_grad` handles NNX modules correctly.
     # It returns grads for variables of type nnx.Param by default.
-    grad_fn = nnx.value_and_grad(
-        loss_fn_for_grad, argnums=0
-    )  # Grad w.r.t. model (arg 0)
+    grad_fn = nnx.value_and_grad(model_loss, argnums=0)  # Grad w.r.t. model (arg 0)
     loss_value, grads = grad_fn(model, batch_frame1, batch_frame2, patch_size_loss)
 
     # Update model parameters using the optimizer
@@ -93,7 +96,7 @@ def train_model():
     # Prepare TensorBoard SummaryWriter
     if not os.path.exists(TENSORBOARD_LOG_DIR):
         os.makedirs(TENSORBOARD_LOG_DIR)
-    summary_writer = tensorboard.SummaryWriter(TENSORBOARD_LOG_DIR)
+    summary_writer = tf.summary.create_file_writer(TENSORBOARD_LOG_DIR)
 
     # Prepare dataset
     print("Preparing dataset...")
@@ -133,51 +136,13 @@ def train_model():
 
             if global_step % LOG_EVERY_N_STEPS == 0:
                 print(
-                    f"Epoch: {epoch + 1}/{NUM_EPOCHS}, Step: {global_step}, Loss: {loss:.4f}"
+                    f"Epoch: {epoch + 1}/{NUM_EPOCHS}, Step: {global_step}, Loss: {loss:.10f}"
                 )
-                summary_writer.scalar("train_loss", loss, global_step)
-                pyramid_kernel_grads = (
-                    grads.pyramid.shared_conv.kernel
-                )  # Accessing the gradient for the kernel
-                summary_writer.scalar(
-                    "grads/pyramid_kernel_norm",
-                    jnp.linalg.norm(pyramid_kernel_grads.value),
-                    global_step,
-                )
-                summary_writer.histogram(
-                    "grads/pyramid_kernel_values",
-                    pyramid_kernel_grads.value,
-                    global_step,
-                )
-                predictor_grads1 = grads.predictor.dense2.kernel
-                summary_writer.scalar(
-                    "grads/predictor_dense1_kernel_norm",
-                    jnp.linalg.norm(predictor_grads1.value),
-                    global_step,
-                )
-                summary_writer.histogram(
-                    "grads/predictor_dense1_kernel_values",
-                    predictor_grads1.value,
-                    global_step,
-                )
+                with summary_writer.as_default():
+                    tf.summary.scalar("train_loss", loss, global_step)
+                    log_gradients_to_tensorboard(grads, model, global_step)
+                summary_writer.flush()
 
-                # Log pyramid kernel weights (example for the first conv layer if accessible)
-                # This requires knowing the structure of your `BaselinePyramid` params.
-                # Assuming `model.pyramid.shared_conv` is the nnx.Conv module
-                if hasattr(model.pyramid, "shared_conv") and isinstance(
-                    model.pyramid.shared_conv, nnx.Conv
-                ):
-                    kernel_weights = (
-                        model.pyramid.shared_conv.kernel.value
-                    )  # Access .value for nnx.Param
-                    summary_writer.histogram(
-                        "pyramid_shared_conv_kernel", kernel_weights, global_step
-                    )
-                    if model.pyramid.shared_conv.bias is not None:
-                        bias_weights = model.pyramid.shared_conv.bias.value
-                        summary_writer.histogram(
-                            "pyramid_shared_conv_bias", bias_weights, global_step
-                        )
                 # You can add similar logging for predictor weights
 
             global_step += 1
@@ -226,6 +191,84 @@ def train_model():
     # 4. Merge: `loaded_model = nnx.merge(graphdef_from_step1, loaded_params_state)`
     # Or more simply, if you only save params:
     # `model_instance.update(nnx.State(loaded_plain_dict))` if model_instance is already created.
+
+
+def log_gradients_to_tensorboard(grads, model, step):
+    """Logs gradient statistics and histograms to TensorBoard."""
+
+    print(f"Logging gradients at step {step}...")  # Optional debug print
+
+    # Use tree_map_with_path to traverse the gradients Pytree
+    def log_grad_leaf(path, grad_value: jnp.ndarray):
+        # Convert JAX array to TensorFlow tensor
+        tf_grad = tf.convert_to_tensor(grad_value)
+
+        # Create a unique name from the path (e.g., 'model/pyramid/shared_conv/kernel')
+        # Remove the leading 'params' if your grads are from state.params()
+        # Or keep it if it makes sense for your Pytree structure
+        path_parts = tuple(str(p) for p in path if str(p) != "params")  # Example filter
+        name = "/".join(path_parts)  # Use '/' as separator for TB hierarchy
+
+        if name:  # Avoid logging empty names or top-level containers if any
+            try:
+                # Log gradient histogram
+                tf.summary.histogram(f"gradients/{name}", tf_grad, step=step)
+
+                # Log gradient norms as scalars
+                norm = tf.norm(tf_grad)
+                tf.summary.scalar(f"gradients/{name}/norm", norm, step=step)
+
+                # Log mean/max absolute values as scalars
+                mean_abs = tf.reduce_mean(tf.abs(tf_grad))
+                max_abs = tf.reduce_max(tf.abs(tf_grad))
+                tf.summary.scalar(f"gradients/{name}/mean_abs", mean_abs, step=step)
+                tf.summary.scalar(f"gradients/{name}/max_abs", max_abs, step=step)
+
+            except Exception as e:
+                # Handle potential errors during logging (e.g., empty tensors)
+                print(f"Error logging gradient for path {name}: {e}")
+
+        return None  # tree_map_with_path needs to return something, but we discard the result
+
+    # Apply the logging function to each leaf in the grads Pytree
+    tree_map_with_path(log_grad_leaf, grads)
+
+    # Optional: Log overall gradient norm
+    global_norm = optax.global_norm(grads)  # Optax provides a utility for this
+    tf.summary.scalar("gradients/global_norm", global_norm, step=step)
+
+    pyramid_kernel_grads = (
+        grads.pyramid.shared_conv.kernel
+    )  # Accessing the gradient for the kernel
+    tf.summary.scalar(
+        "grads/pyramid_kernel",
+        jnp.linalg.norm(pyramid_kernel_grads.value),
+        step,
+    )
+    tf.summary.scalar(
+        "grads/predictor_dense1",
+        jnp.linalg.norm(grads.predictor.dense1.kernel.value),
+        step,
+    )
+    tf.summary.scalar(
+        "grads/predictor_dense2",
+        jnp.linalg.norm(grads.predictor.dense2.kernel.value),
+        step,
+    )
+
+    pyramid_weights = (
+        model.pyramid.shared_conv.kernel.value
+    )  # Access .value for nnx.Param
+    tf.summary.histogram("weights/pyramid_kernel", pyramid_weights, step)
+    bias_weights = model.pyramid.shared_conv.bias.value
+    tf.summary.histogram("weights/pyramid_bias", bias_weights, step)
+
+    predictor_dense1_weights = model.predictor.dense1.kernel.value
+    tf.summary.histogram("weights/predcitor_dense1", predictor_dense1_weights, step)
+    predictor_dense2_weights = model.predictor.dense2.kernel.value
+    tf.summary.histogram("weights/predcitor_dense2", predictor_dense2_weights, step)
+
+    # Flush the writer to disk
 
 
 if __name__ == "__main__":

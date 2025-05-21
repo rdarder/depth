@@ -1,12 +1,9 @@
 import unittest
 
-import flax.nnx as nnx
-import jax
 import jax.numpy as jnp
 from numpy.testing import assert_array_equal
 
 from flow import estimate_flow_at_level, gather_frame_values
-from predictor import MinimalPredictor
 
 
 class TestGatherFrameValues(unittest.TestCase):
@@ -57,35 +54,38 @@ class TestGatherFrameValues(unittest.TestCase):
         assert gathered.shape == expected_gathered.shape
 
 
-class TestFlowLevelEstimation(unittest.TestCase):
-    def test_estimate_flow_at_level_shapes(self):
-        """
-        Tests estimate_flow_at_level for shape consistency, highlighting
-        the potential shape error during concatenation due to priors' shape.
-        """
-        B, H, W, C = (
-            1,
-            10,
-            10,
-            3,
-        )  # Batch, Height, Width, Channels for images and priors
-        N = 5  # Number of coordinate points selected by gather_frame_values
+class MockPredictorCompatible:
+    def __call__(self, inputs: jnp.ndarray) -> jnp.ndarray:
+        # inputs shape will be (B * N, C + C + P)
+        return jnp.ones((inputs.shape[0], 2))
 
-        # Create dummy inputs with shapes based on the function's expectations and assertions
+
+class TestFlowLevelEstimation(unittest.TestCase):
+    def test_estimate_flow_at_level_output_shape(self):
+        """
+        Tests estimate_flow_at_level for correct output shape when inputs are compatible.
+        """
+        B, H, W, C = 2, 10, 10, 3  # Batch, Height, Width, Channels for images
+        N = 5  # Number of coordinate points selected
+
+        # Create dummy inputs with compatible shapes
         f1 = jnp.ones((B, H, W, C))
         f2 = jnp.ones((B, H, W, C))
-        priors = jnp.ones((B, H, W, C))  # Priors shape matches f1/f2 as per assertion
+        # Priors shape is (B, N, P) to be compatible with concatenation after gather_frame_values
+        # Note: This deviates from the original assertion f1.shape == priors.shape
+        priors = jnp.ones((B, N, 2))
 
         # Coords have shape (B, N, 2)
         f1_coords = jnp.zeros((B, N, 2), dtype=jnp.int32)
         f2_coords = jnp.zeros((B, N, 2), dtype=jnp.int32)
 
-        key = jax.random.PRNGKey(42)
-        rngs = nnx.Rngs(key)
-        mock_predictor = MinimalPredictor(rngs=rngs)
+        mock_predictor = MockPredictorCompatible()
 
-        # The concatenation step is expected to raise a shape error
-        # because f1_selected/f2_selected have shape (B, N, C) and priors has shape (B, H, W, C).
-        # N is not equal to H*W, so the dimensions before the last one won't match for concatenation.
-        with self.assertRaises(TypeError):
-            estimate_flow_at_level(mock_predictor, f1, f2, f1_coords, f2_coords, priors)
+        # Call the function with compatible inputs
+        predicted_flow = estimate_flow_at_level(
+            mock_predictor, f1, f2, f1_coords, f2_coords, priors
+        )
+
+        # Assert the final output shape is (B, N, OutputDim)
+        expected_shape = (B, N, 2)
+        self.assertEqual(predicted_flow.shape, expected_shape)
