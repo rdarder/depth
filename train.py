@@ -14,15 +14,15 @@ from flow_model import OpticalFlow
 from loss import model_loss
 
 # --- Training Configuration ---
-LEARNING_RATE = 1e-4
+LEARNING_RATE = 1e-8
 NUM_EPOCHS = 50
-BATCH_SIZE = 10  # Should match dataset batch size
+BATCH_SIZE = 100  # Should match dataset batch size
 NUM_PYRAMID_LEVELS = 4
 PREDICTOR_HIDDEN_FEATURES = 32
-PATCH_SIZE_LOSS = 3
+PATCH_SIZE_LOSS = 5
 PATCH_SIZE_PYRAMID = 5
-PYRAMID_CHANNELS = 5
-LOG_EVERY_N_STEPS = 500
+PYRAMID_CHANNELS = 8
+LOG_EVERY_N_STEPS = 2000
 TENSORBOARD_LOG_DIR = "./tensorboard_logs"
 MODEL_SAVE_DIR = "./saved_models"
 
