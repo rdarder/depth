@@ -47,7 +47,7 @@ def get_consecutive_frame_pairs(
                 f"Warning: Not enough frames in {video_folder} to form pairs. Skipping."
             )
             continue
-        for skip in range(5):
+        for skip in range(1, 4):
             for i in range(len(frame_files) - skip):
                 frame_n_path = frame_files[i]
                 frame_skip_ahead = frame_files[i + skip]

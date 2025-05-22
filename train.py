@@ -14,15 +14,15 @@ from flow_model import OpticalFlow
 from loss import model_loss
 
 # --- Training Configuration ---
-LEARNING_RATE = 1e-8
+LEARNING_RATE = 1e-10
 NUM_EPOCHS = 50
-BATCH_SIZE = 100  # Should match dataset batch size
+BATCH_SIZE = 500  # Should match dataset batch size
 NUM_PYRAMID_LEVELS = 4
-PREDICTOR_HIDDEN_FEATURES = 32
-PATCH_SIZE_LOSS = 5
-PATCH_SIZE_PYRAMID = 5
-PYRAMID_CHANNELS = 8
-LOG_EVERY_N_STEPS = 100
+PREDICTOR_HIDDEN_FEATURES = 16
+PATCH_SIZE_LOSS = 3
+PATCH_SIZE_PYRAMID = 3
+PYRAMID_CHANNELS = 6
+LOG_EVERY_N_STEPS = 10
 TENSORBOARD_LOG_DIR = "./tensorboard_logs"
 MODEL_SAVE_DIR = "./saved_models"
 
@@ -157,7 +157,7 @@ def train_model():
                 )
                 with summary_writer.as_default():
                     tf.summary.scalar("train_loss", loss, global_step)
-                    # log_gradients_to_tensorboard(grads, model, global_step)
+                    log_gradients_to_tensorboard(grads, model, global_step)
                 summary_writer.flush()
 
                 # You can add similar logging for predictor weights
@@ -233,13 +233,13 @@ def log_gradients_to_tensorboard(grads, model, step):
 
                 # Log gradient norms as scalars
                 norm = tf.norm(tf_grad)
-                tf.summary.scalar(f"gradients/{name}/norm", norm, step=step)
+                tf.summary.scalar(f"gradients_norms/{name}/norm", norm, step=step)
 
                 # Log mean/max absolute values as scalars
-                mean_abs = tf.reduce_mean(tf.abs(tf_grad))
-                max_abs = tf.reduce_max(tf.abs(tf_grad))
-                tf.summary.scalar(f"gradients/{name}/mean_abs", mean_abs, step=step)
-                tf.summary.scalar(f"gradients/{name}/max_abs", max_abs, step=step)
+                # mean_abs = tf.reduce_mean(tf.abs(tf_grad))
+                # max_abs = tf.reduce_max(tf.abs(tf_grad))
+                # tf.summary.scalar(f"gradients/{name}/mean_abs", mean_abs, step=step)
+                # tf.summary.scalar(f"gradients/{name}/max_abs", max_abs, step=step)
 
             except Exception as e:
                 # Handle potential errors during logging (e.g., empty tensors)
@@ -272,6 +272,11 @@ def log_gradients_to_tensorboard(grads, model, step):
         jnp.linalg.norm(grads.predictor.dense2.kernel.value),
         step,
     )
+    tf.summary.scalar(
+        "grads/predictor_dense3",
+        jnp.linalg.norm(grads.predictor.dense2.kernel.value),
+        step,
+    )
 
     pyramid_weights = (
         model.pyramid.shared_conv.kernel.value
@@ -284,6 +289,8 @@ def log_gradients_to_tensorboard(grads, model, step):
     tf.summary.histogram("weights/predcitor_dense1", predictor_dense1_weights, step)
     predictor_dense2_weights = model.predictor.dense2.kernel.value
     tf.summary.histogram("weights/predcitor_dense2", predictor_dense2_weights, step)
+    predictor_dense3_weights = model.predictor.dense3.kernel.value
+    tf.summary.histogram("weights/predcitor_dense3", predictor_dense3_weights, step)
 
     # Flush the writer to disk
 
