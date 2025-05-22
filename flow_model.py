@@ -7,7 +7,7 @@ import jax.numpy as jnp
 from flow import estimate_flow_incrementally
 from predictor import MinimalPredictor
 from pyramid import BaselinePyramid
-
+from typing import Sequence
 
 class OpticalFlow(nnx.Module):
     def __init__(
@@ -19,6 +19,7 @@ class OpticalFlow(nnx.Module):
         *,
         rngs: nnx.Rngs,
     ):
+        self.pyramid_levels = num_pyramid_levels
         self.pyramid = BaselinePyramid(
             patch_size=pyramid_patch_size,
             num_levels=num_pyramid_levels,
@@ -33,8 +34,8 @@ class OpticalFlow(nnx.Module):
         # self.num_pyramid_levels = num_pyramid_levels
 
     def __call__(
-        self, frame1: jax.Array, frame2: jax.Array, priors: Optional[jax.Array]
-    ) -> jax.Array:
+        self, frame1: jax.Array, frame2: jax.Array, priors: Optional[jax.Array] = None
+    ) -> tuple[Sequence[jax.Array], Sequence[jax.Array], dict]:
         """
         Performs full optical flow estimation.
         Args:

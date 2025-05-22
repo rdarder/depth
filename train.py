@@ -32,12 +32,10 @@ DATASET_DIR = "datasets/frames"  # or your actual dataset path
 IMAGE_EXTENSION = ".png"
 TARGET_IMG_HEIGHT = 64  # Example, make sure divisible for pyramid
 TARGET_IMG_WIDTH = 64  # Example
-FLOW_REGULARIZATION_WEIGHT = 2.0  # You might need to tune this value
+FLOW_REGULARIZATION_WEIGHT = 0.
 
-
-def initialize_model_and_optimizer(key: jax.random.PRNGKey, learning_rate: float):
+def initialize_model_and_optimizer(rngs: nnx.Rngs, learning_rate: float):
     """Initializes the model and the optimizer."""
-    model_key, _ = jax.random.split(key)
 
     # Initialize the main model (which initializes submodules)
     # NNX modules are stateful, initialization happens at construction.
@@ -48,7 +46,7 @@ def initialize_model_and_optimizer(key: jax.random.PRNGKey, learning_rate: float
         pyramid_patch_size=PATCH_SIZE_PYRAMID,
         predictor_hidden_features=PREDICTOR_HIDDEN_FEATURES,
         pyramid_output_channels=PYRAMID_CHANNELS,
-        rngs=nnx.Rngs(params=model_key),  # Pass Rngs for parameter initialization
+        rngs=rngs,  # Pass Rngs for parameter initialization
     )
 
     # Create the optimizer using nnx.Optimizer
@@ -59,6 +57,13 @@ def initialize_model_and_optimizer(key: jax.random.PRNGKey, learning_rate: float
     return model, optimizer
 
 
+def get_random_prior(levels: int, input_shape: tuple[int, int, int, int], rngs: nnx.Rngs) -> (
+        jax.Array):
+    B, H, W, C = input_shape
+    height = H // (2**levels)
+    width = W // (2**levels)
+    return jax.random.normal(rngs.priors(), (B, height * width, 2)) * 0.1
+
 @partial(nnx.jit, static_argnums=(4, 5))  # JIT compile the training step
 def train_step(
     model: OpticalFlow,
@@ -67,18 +72,24 @@ def train_step(
     batch_frame2: jax.Array,
     loss_patch_size: int,
     flow_regularization_weight: float,
+    rngs: nnx.Rngs,
 ):
     """Performs a single training step."""
     # Compute loss and gradients.
     # `nnx.value_and_grad` handles NNX modules correctly.
     # It returns grads for variables of type nnx.Param by default.
+
+    priors = get_random_prior(model.pyramid_levels, batch_frame1.shape, rngs)
+
     grad_fn = nnx.value_and_grad(model_loss, argnums=0, has_aux=True)  # Grad w.r.t. model (arg 0)
     (loss_value, debug_info), grads = grad_fn(
         model,
         batch_frame1,
         batch_frame2,
         loss_patch_size,
+        priors,
         flow_regularization_weight=flow_regularization_weight,
+
     )
 
     # Update model parameters using the optimizer
@@ -96,12 +107,11 @@ def train_step(
 def train_model():
     """Main training loop."""
     # Ensure reproducibility / manage randomness
-    main_key = jax.random.PRNGKey(1109)
-    init_key, data_key = jax.random.split(main_key)
+    rngs = nnx.Rngs(42)
 
     # Initialize model and optimizer
     print("Initializing model and optimizer...")
-    model, optimizer = initialize_model_and_optimizer(init_key, LEARNING_RATE)
+    model, optimizer = initialize_model_and_optimizer(rngs, LEARNING_RATE)
     print("Initialization complete.")
 
     # Prepare TensorBoard SummaryWriter
@@ -151,11 +161,12 @@ def train_model():
                 batch_f2,
                 PATCH_SIZE_LOSS,
                 FLOW_REGULARIZATION_WEIGHT,
+                rngs
             )
 
             if global_step % LOG_EVERY_N_STEPS == 0:
                 level_loss_weights = [
-                    p["loss_weight"].item() for p in debug_info["photometric"][
+                    p["loss_weight_avg"].item() for p in debug_info["photometric"][
                     "per_level"]
                 ]
                 formatted_weights = [f"{w:4f}" for w in level_loss_weights]
@@ -319,11 +330,6 @@ def log_debug_info_to_tensorboard(aux_data, step, summary_writer):
             photo_details.get("loss", 0.0),
             step=step,
         )
-        tf.summary.scalar(
-            "photometric_debug/total_in_frame",
-            photo_details.get("total_in_frame", 0.0),
-            step=step,
-        )
 
         per_level_details_list = photo_details.get("per_level", [])
         # Note: per_level_details_list is a Python list of dicts of JAX arrays.
@@ -336,25 +342,20 @@ def log_debug_info_to_tensorboard(aux_data, step, summary_writer):
             # (depends on how JAX handles dicts with JAX arrays as values through has_aux)
             # Typically, they are returned as JAX arrays.
             unweighted_avg_loss = jnp.asarray(
-                level_detail.get("unweighted_avg_loss", 0.0)
+                level_detail.get("weighted_loss_avg", 0.0)
             )
             loss_weight = jnp.asarray(
-                level_detail.get("loss_weight", 0.0)
+                level_detail.get("loss_weight_avg", 0.0)
             )
 
             tf.summary.scalar(
-                f"photometric_level_{level_idx}/unweighted_avg_loss",
+                f"photometric_level_{level_idx}/weighted_loss_avg",
                 unweighted_avg_loss,
                 step=step,
             )
             tf.summary.scalar(
-                f"photometric_level_{level_idx}/loss_weight",
+                f"photometric_level_{level_idx}/loss_weight_avg",
                 loss_weight,
-                step=step,
-            )
-            tf.summary.scalar(
-                f"photometric_level_{level_idx}/in_frame",
-                jnp.asarray(level_detail.get("in_frame", 0)),
                 step=step,
             )
             tf.summary.scalar(

@@ -193,7 +193,7 @@ def photometric_loss_for_level(
     f2_coords,  # [B, N, 2] dtype=float
     flow_with_confidence: jax.Array,  # [B, H, W, 3]
     patch_size: int,
-) -> tuple[jax.Array, jax.Array]:
+) -> jax.Array:
     """
     Computes photometric loss between frame1 and warped frame2 at Level 0.
     Uses rounded coordinates for warping (no interpolation for P2).
@@ -208,31 +208,32 @@ def photometric_loss_for_level(
     f1_patches = get_batched_patches(frame1, f1_coords, patch_size)
     f2_patches = get_batched_patches_differentiable(frame2, f2_coords, patch_size)
     patch_losses = jnp.abs(f1_patches - f2_patches)
-    per_patch_loss = jnp.mean(patch_losses, axis=(2, 3, 4))
-    masked_loss = jnp.where(overflow_mask, per_patch_loss, 0)
-    in_frame = jnp.count_nonzero(overflow_mask)
-    loss = jnp.sum(masked_loss)
-    return in_frame, loss
+    per_batch_loss_sum = jnp.sum(patch_losses, axis=(1, 2, 3, 4))
+    return per_batch_loss_sum
+    # masked_loss = jnp.where(overflow_mask, per_patch_loss, 0)
+    # in_frame = jnp.count_nonzero(overflow_mask, axis=1)
+    # loss = jnp.sum(masked_loss, axis=1)
+    # return in_frame, loss
 
 
 def level_loss_discount(previous_level_loss, level_loss):
     previous = jax.lax.stop_gradient(previous_level_loss)
     current = jax.lax.stop_gradient(level_loss)
-    loss_ratio = jnp.clip(previous / (0.8 * current + 1e-8), max=jnp.array([1.0]))
+    loss_ratio = jnp.clip(previous / (1.0 * current + 1e-8), max=jnp.array(1.0))
     return loss_ratio
 
 def photometric_loss(f1_pyramid, f2_pyramid, estimations, patch_size):
     coarsest_frame = f1_pyramid[0]
     B, H, W, C = coarsest_frame.shape
-    sum_loss = jnp.array([0.0])
-    sum_in_frame = jnp.array([0])
-    previous_level_loss = jnp.array([10.0])
-    loss_weight = jnp.array([1.0])
+    level_loss_weight_b = jnp.ones(B, dtype=jnp.float32)
+    previous_level_loss_avg_b = jnp.ones(B, dtype=jnp.float32)
+    loss_b = jnp.array(0.0)
     debug_info_levels = []
+    total_pixel_count = 0
     for level in range(len(f1_pyramid)):
         f1_coords = estimations["f1_kept"][level] * 2
         f2_coords = estimations["f2_kept"][level] * 2
-        level_in_frame, level_loss = photometric_loss_for_level(
+        level_loss_sum_b = photometric_loss_for_level(
             frame1=f1_pyramid[level],
             frame2=f2_pyramid[level],
             f1_coords=f1_coords,
@@ -240,26 +241,41 @@ def photometric_loss(f1_pyramid, f2_pyramid, estimations, patch_size):
             flow_with_confidence=estimations["flow_with_confidence"][level],
             patch_size=patch_size,
         )
-        avg_level_loss = level_loss / level_in_frame
-        loss_weight = (loss_weight**2) * level_loss_discount(previous_level_loss, avg_level_loss)
-        sum_loss = sum_loss + level_loss * loss_weight
-        sum_in_frame = sum_in_frame + level_in_frame * loss_weight
-        previous_level_loss = avg_level_loss
+        pixel_count = (f1_coords.shape[1] * f1_coords.shape[0])
+        total_pixel_count += pixel_count
+        # batched_level_loss = level_loss / jnp.clip(level_in_frame, 1)
+        level_pixel_loss_avg = level_loss_sum_b / pixel_count
+        weighted_level_loss_sum = level_loss_sum_b * level_loss_weight_b
+        next_level_loss_discount_b = level_loss_discount(previous_level_loss_avg_b, level_pixel_loss_avg)
+        level_loss_weight_b = level_loss_weight_b * next_level_loss_discount_b
+        previous_level_loss_avg_b =  level_pixel_loss_avg
+
+        weighted_level_loss_avg = jnp.mean(weighted_level_loss_sum)
+        level_loss_weight_avg = jnp.mean(level_loss_weight_b)
+        # jax.debug.print("weighted_level_loss_avg: {x}", x=weighted_level_loss_avg)
+        # jax.debug.print("next_level_loss_discount_avg: {x}", x=jnp.mean(next_level_loss_discount_b))
+        # jax.debug.print("level_loss_weight_avg: {x}", x=level_loss_weight_avg)
+
+        loss_b += weighted_level_loss_sum
         debug_info_levels.append({
             "level_idx": level,
-            "unweighted_avg_loss": avg_level_loss,
-            "loss_weight": loss_weight[0],
-            "loss": ((level_loss * loss_weight) / jnp.clip(level_in_frame, 1))[0],
-            "in_frame": level_in_frame
+            "weighted_loss_avg": weighted_level_loss_avg,
+            "loss_weight_avg": level_loss_weight_avg,
+            "loss": weighted_level_loss_avg,
             })
 
-    loss = sum_loss / jnp.clip(sum_in_frame, 1)
+    # dividing by the last loss discount b effectively raises up the loss count for the
+    # last level the equivalent of not being weighted, and lifts all of the other levels
+    # proportionally. It's awful, The goal is not to incentivize worsening at the top levels
+    # because that would reduce the overall loss. Instead the upper levels are penalized more
+    # based on the last levels performance.
+    loss = jnp.mean((loss_b / level_loss_weight_b) / total_pixel_count)
+
     debug_info = {
         "per_level": debug_info_levels,
-        "loss": loss[0],
-        "in_frame": sum_in_frame[0],
+        "loss": loss,
     }
-    return loss[0], debug_info
+    return loss, debug_info
 
 
 def model_loss(
@@ -267,13 +283,13 @@ def model_loss(
     batch_frame1: jax.Array,
     batch_frame2: jax.Array,
     patch_size: int,
-    priors: Optional[jax.Array] = None,
+    priors: Optional[jax.Array],
     flow_regularization_weight: float = 1e-5,
 ):
     """Computes the loss for gradient calculation."""
     # Forward pass through the main model
     f1_pyramid, f2_pyramid, estimations = model(
-        batch_frame1, batch_frame2, priors=priors
+        batch_frame1, batch_frame2, priors
     )
     levels = len(f1_pyramid)
     f1_source = [conv_output[:, :, :, :1] for conv_output in f1_pyramid[1:levels]] + [
