@@ -12,18 +12,19 @@ from jax.tree_util import tree_map_with_path
 from datasets import create_dataset, get_consecutive_frame_pairs
 from flow_model import OpticalFlow
 from loss import model_loss
+from datetime import datetime
 
 # --- Training Configuration ---
-LEARNING_RATE = 1e-10
-NUM_EPOCHS = 50
-BATCH_SIZE = 500  # Should match dataset batch size
+LEARNING_RATE = 1e-9
+NUM_EPOCHS = 500
+BATCH_SIZE = 1000  # Should match dataset batch size
 NUM_PYRAMID_LEVELS = 4
-PREDICTOR_HIDDEN_FEATURES = 16
+PREDICTOR_HIDDEN_FEATURES = (16,8,8)
 PATCH_SIZE_LOSS = 3
-PATCH_SIZE_PYRAMID = 3
+PATCH_SIZE_PYRAMID = 4
 PYRAMID_CHANNELS = 6
 LOG_EVERY_N_STEPS = 10
-TENSORBOARD_LOG_DIR = "./tensorboard_logs"
+TENSORBOARD_LOG_DIR_BASE = "./tensorboard_logs"
 MODEL_SAVE_DIR = "./saved_models"
 
 # Dataset params (should match dataset script)
@@ -52,13 +53,10 @@ def initialize_model_and_optimizer(key: jax.random.PRNGKey, learning_rate: float
 
     # Create the optimizer using nnx.Optimizer
     # It will manage the parameters of the 'model' instance.
-    tx = optax.adam(learning_rate=learning_rate)
+    tx = optax.adamw(learning_rate=learning_rate)
     optimizer = nnx.Optimizer(model, tx)
 
     return model, optimizer
-
-
-partial
 
 
 @partial(nnx.jit, static_argnums=(4, 5))  # JIT compile the training step
@@ -74,8 +72,8 @@ def train_step(
     # Compute loss and gradients.
     # `nnx.value_and_grad` handles NNX modules correctly.
     # It returns grads for variables of type nnx.Param by default.
-    grad_fn = nnx.value_and_grad(model_loss, argnums=0)  # Grad w.r.t. model (arg 0)
-    loss_value, grads = grad_fn(
+    grad_fn = nnx.value_and_grad(model_loss, argnums=0, has_aux=True)  # Grad w.r.t. model (arg 0)
+    (loss_value, debug_info), grads = grad_fn(
         model,
         batch_frame1,
         batch_frame2,
@@ -91,13 +89,14 @@ def train_step(
         optimizer,
         loss_value,
         grads,
+        debug_info
     )  # Model and optimizer are returned because JIT works with pure functions
 
 
 def train_model():
     """Main training loop."""
     # Ensure reproducibility / manage randomness
-    main_key = jax.random.PRNGKey(100)
+    main_key = jax.random.PRNGKey(1109)
     init_key, data_key = jax.random.split(main_key)
 
     # Initialize model and optimizer
@@ -106,9 +105,12 @@ def train_model():
     print("Initialization complete.")
 
     # Prepare TensorBoard SummaryWriter
-    if not os.path.exists(TENSORBOARD_LOG_DIR):
-        os.makedirs(TENSORBOARD_LOG_DIR)
-    summary_writer = tf.summary.create_file_writer(TENSORBOARD_LOG_DIR)
+    current_time = datetime.now().strftime("%Y%m%d-%H%M%S")
+    current_run_log_dir = os.path.join(TENSORBOARD_LOG_DIR_BASE, current_time)
+    if not os.path.exists(current_run_log_dir):
+        os.makedirs(current_run_log_dir)
+    summary_writer = tf.summary.create_file_writer(current_run_log_dir)
+
 
     # Prepare dataset
     print("Preparing dataset...")
@@ -142,7 +144,7 @@ def train_model():
             # Perform a training step
             # Note: JIT expects static shapes. tf.data with drop_remainder=True helps.
             # Our dummy dataset always yields full batches.
-            model, optimizer, loss, grads = train_step(
+            model, optimizer, loss, grads, debug_info = train_step(
                 model,
                 optimizer,
                 batch_f1,
@@ -152,12 +154,20 @@ def train_model():
             )
 
             if global_step % LOG_EVERY_N_STEPS == 0:
+                level_loss_weights = [
+                    p["loss_weight"].item() for p in debug_info["photometric"][
+                    "per_level"]
+                ]
+                formatted_weights = [f"{w:4f}" for w in level_loss_weights]
+
                 print(
                     f"Epoch: {epoch + 1}/{NUM_EPOCHS}, Step: {global_step}, Loss: {loss:.10f}"
+                    f", Level weights: {formatted_weights}"
                 )
                 with summary_writer.as_default():
                     tf.summary.scalar("train_loss", loss, global_step)
-                    log_gradients_to_tensorboard(grads, model, global_step)
+                    # log_gradients_to_tensorboard(grads, model, global_step)
+                    log_debug_info_to_tensorboard(debug_info, global_step, summary_writer)
                 summary_writer.flush()
 
                 # You can add similar logging for predictor weights
@@ -262,21 +272,11 @@ def log_gradients_to_tensorboard(grads, model, step):
         jnp.linalg.norm(pyramid_kernel_grads.value),
         step,
     )
-    tf.summary.scalar(
-        "grads/predictor_dense1",
-        jnp.linalg.norm(grads.predictor.dense1.kernel.value),
-        step,
-    )
-    tf.summary.scalar(
-        "grads/predictor_dense2",
-        jnp.linalg.norm(grads.predictor.dense2.kernel.value),
-        step,
-    )
-    tf.summary.scalar(
-        "grads/predictor_dense3",
-        jnp.linalg.norm(grads.predictor.dense2.kernel.value),
-        step,
-    )
+    for i, layer in enumerate(grads.predictor.hidden_layers):
+        tf.summary.scalar(
+            f"grads/predictor_dense_{i:02}",
+            jnp.linalg.norm(layer.kernel.value)
+        )
 
     pyramid_weights = (
         model.pyramid.shared_conv.kernel.value
@@ -285,14 +285,83 @@ def log_gradients_to_tensorboard(grads, model, step):
     bias_weights = model.pyramid.shared_conv.bias.value
     tf.summary.histogram("weights/pyramid_bias", bias_weights, step)
 
-    predictor_dense1_weights = model.predictor.dense1.kernel.value
-    tf.summary.histogram("weights/predcitor_dense1", predictor_dense1_weights, step)
-    predictor_dense2_weights = model.predictor.dense2.kernel.value
-    tf.summary.histogram("weights/predcitor_dense2", predictor_dense2_weights, step)
-    predictor_dense3_weights = model.predictor.dense3.kernel.value
-    tf.summary.histogram("weights/predcitor_dense3", predictor_dense3_weights, step)
+    for i, layer in enumerate(grads.predictor.hidden_layers):
+        tf.summary.histogram(
+            f"weights/predictor_dense_{i:02}",
+            layer.kernel.value
+        )
 
     # Flush the writer to disk
+
+
+def log_debug_info_to_tensorboard(aux_data, step, summary_writer):
+    """Logs auxiliary data from the loss function to TensorBoard."""
+    with summary_writer.as_default():
+        # Log components of the main loss
+        tf.summary.scalar(
+            "loss_components/photometric_loss",
+            aux_data["photometric_loss_component"],
+            step=step,
+        )
+        tf.summary.scalar(
+            "loss_components/flow_regularization_loss",
+            aux_data["flow_regularization_loss_component"],
+            step=step,
+        )
+        tf.summary.scalar(
+            "loss_components/avg_flow_squared", aux_data["avg_flow_squared"], step=step
+        )
+
+        # Log details from photometric_loss
+        photo_details = aux_data.get("photometric", {})
+        tf.summary.scalar(
+            "photometric_debug/loss",
+            photo_details.get("loss", 0.0),
+            step=step,
+        )
+        tf.summary.scalar(
+            "photometric_debug/total_in_frame",
+            photo_details.get("total_in_frame", 0.0),
+            step=step,
+        )
+
+        per_level_details_list = photo_details.get("per_level", [])
+        # Note: per_level_details_list is a Python list of dicts of JAX arrays.
+        # When JITted, these JAX arrays are concrete values *outside* the JIT boundary.
+        for level_detail in per_level_details_list:
+            level_idx = level_detail.get(
+                "level_idx"
+            )  # This will be a concrete Python int
+            # Convert JAX arrays to NumPy for TF summary if they are still JAX arrays here
+            # (depends on how JAX handles dicts with JAX arrays as values through has_aux)
+            # Typically, they are returned as JAX arrays.
+            unweighted_avg_loss = jnp.asarray(
+                level_detail.get("unweighted_avg_loss", 0.0)
+            )
+            loss_weight = jnp.asarray(
+                level_detail.get("loss_weight", 0.0)
+            )
+
+            tf.summary.scalar(
+                f"photometric_level_{level_idx}/unweighted_avg_loss",
+                unweighted_avg_loss,
+                step=step,
+            )
+            tf.summary.scalar(
+                f"photometric_level_{level_idx}/loss_weight",
+                loss_weight,
+                step=step,
+            )
+            tf.summary.scalar(
+                f"photometric_level_{level_idx}/in_frame",
+                jnp.asarray(level_detail.get("in_frame", 0)),
+                step=step,
+            )
+            tf.summary.scalar(
+                f"photometric_level_{level_idx}/loss",
+                jnp.asarray(level_detail.get("loss", 0)),
+                step=step,
+            )
 
 
 if __name__ == "__main__":
@@ -300,3 +369,5 @@ if __name__ == "__main__":
     tf.config.set_visible_devices([], "GPU")
 
     train_model()
+
+

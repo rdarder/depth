@@ -15,7 +15,7 @@ class OpticalFlow(nnx.Module):
         num_pyramid_levels: int = 4,
         pyramid_patch_size: int = 3,
         pyramid_output_channels: int = 4,
-        predictor_hidden_features: int = 32,
+        predictor_hidden_features: tuple[int,...] = (32,),
         *,
         rngs: nnx.Rngs,
     ):

@@ -193,7 +193,7 @@ def photometric_loss_for_level(
     f2_coords,  # [B, N, 2] dtype=float
     flow_with_confidence: jax.Array,  # [B, H, W, 3]
     patch_size: int,
-) -> jax.Array:
+) -> tuple[jax.Array, jax.Array]:
     """
     Computes photometric loss between frame1 and warped frame2 at Level 0.
     Uses rounded coordinates for warping (no interpolation for P2).
@@ -215,11 +215,20 @@ def photometric_loss_for_level(
     return in_frame, loss
 
 
+def level_loss_discount(previous_level_loss, level_loss):
+    previous = jax.lax.stop_gradient(previous_level_loss)
+    current = jax.lax.stop_gradient(level_loss)
+    loss_ratio = jnp.clip(previous / (0.8 * current + 1e-8), max=jnp.array([1.0]))
+    return loss_ratio
+
 def photometric_loss(f1_pyramid, f2_pyramid, estimations, patch_size):
     coarsest_frame = f1_pyramid[0]
     B, H, W, C = coarsest_frame.shape
     sum_loss = jnp.array([0.0])
     sum_in_frame = jnp.array([0])
+    previous_level_loss = jnp.array([10.0])
+    loss_weight = jnp.array([1.0])
+    debug_info_levels = []
     for level in range(len(f1_pyramid)):
         f1_coords = estimations["f1_kept"][level] * 2
         f2_coords = estimations["f2_kept"][level] * 2
@@ -231,11 +240,26 @@ def photometric_loss(f1_pyramid, f2_pyramid, estimations, patch_size):
             flow_with_confidence=estimations["flow_with_confidence"][level],
             patch_size=patch_size,
         )
-        sum_loss = sum_loss + level_loss
-        sum_in_frame = sum_in_frame + level_in_frame
+        avg_level_loss = level_loss / level_in_frame
+        loss_weight = (loss_weight**2) * level_loss_discount(previous_level_loss, avg_level_loss)
+        sum_loss = sum_loss + level_loss * loss_weight
+        sum_in_frame = sum_in_frame + level_in_frame * loss_weight
+        previous_level_loss = avg_level_loss
+        debug_info_levels.append({
+            "level_idx": level,
+            "unweighted_avg_loss": avg_level_loss,
+            "loss_weight": loss_weight[0],
+            "loss": ((level_loss * loss_weight) / jnp.clip(level_in_frame, 1))[0],
+            "in_frame": level_in_frame
+            })
 
     loss = sum_loss / jnp.clip(sum_in_frame, 1)
-    return loss[0]
+    debug_info = {
+        "per_level": debug_info_levels,
+        "loss": loss[0],
+        "in_frame": sum_in_frame[0],
+    }
+    return loss[0], debug_info
 
 
 def model_loss(
@@ -263,12 +287,21 @@ def model_loss(
     avg_flow = jnp.average(last_level_flow**2)
 
     # Compute photometric loss
-    photo_loss = photometric_loss(
+    photo_loss, photo_debug_info = photometric_loss(
         f1_source,
         f2_source,
         estimations,
         patch_size=patch_size,
     )
     flow_regularization_loss = avg_flow * flow_regularization_weight
+    total_loss = photo_loss + flow_regularization_loss
 
-    return photo_loss + flow_regularization_loss
+    debug_info = {
+        "total_loss": total_loss,
+        "photometric_loss_component": photo_loss,
+        "flow_regularization_loss_component": flow_regularization_loss,
+        "avg_flow_squared": avg_flow,
+        "photometric": photo_debug_info # Nested debug info
+    }
+
+    return total_loss, debug_info

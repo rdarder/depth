@@ -4,6 +4,25 @@ import jax
 import jax.numpy as jnp
 
 
+class AverageFixedConv(nnx.Module):
+    def __init__(self, patch_size: int, strides: int):
+        self.patch_size = patch_size
+        self.strides = strides
+
+    def __call__(self, x: jax.Array) -> jax.Array:
+        B, H, W, C = x.shape
+        assert C == 1
+        sum = jax.lax.reduce_window(
+            x,
+            0.0,
+            jax.numpy.add,
+            (1, self.patch_size, self.patch_size, 1),
+            (1, self.strides, self.strides, 1),
+            padding="same",
+        )
+        return sum / (self.patch_size**2)
+
+
 class BaselinePyramid(nnx.Module):
     """
     Learned Feature Pyramid using a shared convolution.
@@ -27,7 +46,7 @@ class BaselinePyramid(nnx.Module):
         # out_channels=4 as specified.
         self.shared_conv = nnx.Conv(
             in_features=1,
-            out_features=out_channels,
+            out_features=out_channels-1,
             kernel_size=(patch_size, patch_size),
             strides=strides,
             padding="SAME",  # Or 'VALID', depending on desired behaviour at edges
@@ -35,6 +54,7 @@ class BaselinePyramid(nnx.Module):
             # bias_init=nnx.initializers.zeros(), # Example initializer
             rngs=rngs,  # Pass rngs for initialization if needed by init functions
         )
+        self.avg_conv = AverageFixedConv(patch_size, strides)
         # Note: self.shared_conv is an nnx.Module, its parameters are nested inside self.
 
     def __call__(self, x: jax.Array) -> list[jax.Array]:
@@ -50,18 +70,15 @@ class BaselinePyramid(nnx.Module):
             for Level i+1). The list will have num_levels elements.
         """
         level_features = []
-        current_input = x  # Start with the original image for the first level
 
         for _ in range(self.num_levels):
             # Apply the shared convolution to the current level's input
-            conv_output = self.shared_conv(current_input)  # Shape: [B, H/2, W/2, 4]
+            conv_output = self.shared_conv(x)  # Shape: [B, H/2, W/2, 4]
+            x = self.avg_conv(x)
 
             # Store the 4-channel output features for this level
-            level_features.append(conv_output)
-
-            # Select the first channel to be the input for the next pyramid level
-            # Need to keep the channel dimension explicit [B, H/2, W/2, 1]
-            current_input = conv_output[..., :1]
+            level_out = jnp.concatenate([x, conv_output], axis=-1)
+            level_features.append(level_out)
 
         return level_features[::-1]
 

@@ -9,7 +9,7 @@ DATASET_DIR = "datasets/frames"  # Your root dataset directory
 IMAGE_EXTENSION = ".png"
 TARGET_IMG_HEIGHT = 64  # Example, adjust to your needs
 TARGET_IMG_WIDTH = 64  # Example, adjust to your needs
-SHUFFLE_BUFFER_SIZE = 1000  # Adjust based on dataset size
+SHUFFLE_BUFFER_SIZE = 50_000  # Adjust based on dataset size
 BATCH_SIZE = 4  # Example batch size
 
 
@@ -47,7 +47,7 @@ def get_consecutive_frame_pairs(
                 f"Warning: Not enough frames in {video_folder} to form pairs. Skipping."
             )
             continue
-        for skip in range(1, 4):
+        for skip in range(1, 8):
             for i in range(len(frame_files) - skip):
                 frame_n_path = frame_files[i]
                 frame_skip_ahead = frame_files[i + skip]
