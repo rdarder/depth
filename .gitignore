@@ -8,3 +8,5 @@ __pycache__/
 datasets_dummy/
 tensorboard_logs/
 .zed/
+saved_models/
+.idea/
