@@ -387,8 +387,7 @@ class MultiLayerFlowPredictor(nnx.Module):
 
         extra_borders = jnp.pad(reshaped_for_conv,
                                 ((0, 0), (0, 0), (1, 1), (1, 1)), mode='edge')
-        smoothed_reshaped = jax.lax.conv(extra_borders, self._smoothing_kernel.value, (1, 1),
-                                         'valid')
+        smoothed_reshaped = jax.lax.conv(extra_borders, self._smoothing_kernel.value, (1, 1), 'valid')
         smoothed = smoothed_reshaped.reshape(B, F, H, W)
         return smoothed
 
@@ -433,11 +432,13 @@ class SingleLevelPhotometricLoss(nnx.Module):
         ncc_scores_flat = jax.vmap(self._calculate_single_ncc, in_axes=(0, 0))(
             frame1_patches, frame2_patches
         )  # Output shape: (B * PH * PW)
-        # Compute loss (1 - NCC) and average over all patches
+        # Compute loss (1 - NCC) and sum over all patches
         per_patch_loss = (1.0 - ncc_scores_flat) / 2.0  # Scale to [0,1]
         per_batch_patches_loss = per_patch_loss.reshape(B, FH, FW)
-        level_loss = jnp.sum(per_batch_patches_loss, axis=(1, 2))  # Average over the entire
-        # flattened
+
+        # --- CHANGE: Return MEAN over patches per batch item ---
+        level_loss = jnp.mean(per_batch_patches_loss, axis=(1, 2))
+        # --- END CHANGE ---
 
         return level_loss
 
@@ -450,70 +451,155 @@ class SingleLevelPhotometricLoss(nnx.Module):
         numerator = jnp.sum(dev1 * dev2)
         sum_sq_dev1 = jnp.sum(dev1 ** 2)
         sum_sq_dev2 = jnp.sum(dev2 ** 2)
-        denominator = jnp.sqrt(sum_sq_dev1 * sum_sq_dev2) + 1e-6
+
+        # Add epsilon inside each square root term (Numerical stability fix)
+        stddev1 = jnp.sqrt(sum_sq_dev1 + 1e-6)
+        stddev2 = jnp.sqrt(sum_sq_dev2 + 1e-6)
+        denominator = stddev1 * stddev2 + 1e-6  # Keep epsilon for the final division just in case
+
         ncc_score = numerator / denominator
         ncc_score = jnp.clip(ncc_score, -1.0, 1.0)
         return ncc_score
 
 
 class MultiLevelPhotometricLoss(nnx.Module):
-    def __init__(self, ncc_patch_size: int, *, rngs: nnx.Rngs):
+    _alpha: float
+    _beta: float
+    _gamma: float
+
+    def __init__(self, ncc_patch_size: int, *, rngs: nnx.Rngs,
+                 alpha: float = 10.0, beta: float = 1.0, gamma: float = 1.0):
         self._single_level_photometric_loss = SingleLevelPhotometricLoss(
             ncc_patch_size=ncc_patch_size,
             rngs=rngs
         )
-        self._patch_size=ncc_patch_size
+        self._patch_size = ncc_patch_size
+        self._alpha = alpha
+        self._beta = beta
+        self._gamma = gamma
 
+    # --- CHANGE: Update return type annotation to include auxiliary data dict ---
     def __call__(self, pyramid1: Sequence[jax.Array], pyramid2: Sequence[jax.Array],
-                 flow: Sequence[
-                     jax.Array]) -> jax.Array:  # <-- CHANGE: Return type is now a single JAX array
-        level_losses_per_batch_item = []
-        for f1, f2, flow in zip(pyramid1, pyramid2, flow):
-            # Each call to _single_level_photometric_loss returns (B,) array (sum of losses per batch item for that level)
-            level_losses_per_batch_item.append(self._single_level_photometric_loss(f1, f2, flow))
+                 flow: Sequence[jax.Array]) -> tuple[
+        jax.Array, dict[str, jax.Array | Sequence[jax.Array]]]:
+        # --- END CHANGE ---
+
+        # Collect MEAN losses per level (each shape (B,))
+        mean_level_losses_per_batch_item = [
+            self._single_level_photometric_loss(f1, f2, flow)
+            for f1, f2, flow in zip(pyramid1, pyramid2, flow)
+        ]
 
         # Stack the (B,) arrays from each level to get (Num_Levels, B)
-        stacked_losses = jnp.stack(level_losses_per_batch_item, axis=0)
+        stacked_mean_losses = jnp.stack(mean_level_losses_per_batch_item, axis=0)  # (N_Levels, B)
 
-        # Sum across levels to get total loss per batch item (B,)
-        total_loss_per_batch_item = jnp.sum(stacked_losses, axis=0)
+        # --- NEW: Calculate average UNWEIGHTED loss per level across the batch ---
+        average_unweighted_losses_per_level = jnp.mean(stacked_mean_losses, axis=1)  # (N_Levels,)
+        # --- END NEW ---
+
+        # Implement loss weighting
+        weights = []
+        num_levels = len(mean_level_losses_per_batch_item)
+
+        for i in range(num_levels - 1):
+            # weights[i] applies to mean_level_losses_per_batch_item[i] (finer level)
+            # derived from mean_level_losses_per_batch_item[i+1] (coarser level)
+            weight_i = jax.nn.sigmoid(
+                self._beta - self._alpha * stacked_mean_losses[i + 1, :])  # (B,)
+            weights.append(weight_i)
+
+        # The coarsest level (index num_levels - 1) gets a fixed weight gamma
+        coarsest_level_weight = jnp.full_like(stacked_mean_losses[num_levels - 1, :],
+                                              self._gamma)  # (B,)
+        weights.append(coarsest_level_weight)
+
+        # Stack weights to (Num_Levels, B)
+        stacked_weights = jnp.stack(weights, axis=0)  # (N_Levels, B)
+
+        # Compute total weighted loss per batch item: sum(weight * mean_loss) over levels
+        total_loss_per_batch_item = jnp.sum(stacked_weights * stacked_mean_losses, axis=0)  # (B,)
 
         # Average across the batch to get a single scalar loss for the entire batch
-        final_scalar_loss = jnp.mean(total_loss_per_batch_item, axis=0)
+        final_scalar_loss = jnp.mean(total_loss_per_batch_item, axis=0)  # Scalar
 
-        return final_scalar_loss
+        # --- CHANGE: Return scalar loss and auxiliary data dict ---
+        aux_data = {
+            'weights': weights,  # List of (B,) arrays, ordered finest to coarsest
+            'mean_unweighted_losses_per_level': average_unweighted_losses_per_level
+            # (N_Levels,) array
+        }
+        return final_scalar_loss, aux_data
+
 
 class ImagePairFlowPredictor(nnx.Module):
     def __init__(self, patch_size: int, channels: int,
-                 levels: int, wavelet: str, ncc_patch_size: int, rngs: nnx.Rngs):
+                 levels: int, wavelet: str, ncc_patch_size: int, rngs: nnx.Rngs,
+                 loss_alpha: float = 10.0, loss_beta: float = 1.0, loss_gamma: float = 1.0):
         self._layers_predictor = MultiLayerFlowPredictor(
             patch_size=patch_size,
             channels=channels,
             rngs=rngs
         )
         self._image_decomposition = ImageDecomposition(levels=levels, rngs=rngs, wavelet=wavelet)
-        self._loss = MultiLevelPhotometricLoss(ncc_patch_size=ncc_patch_size, rngs=rngs)
+        self._loss = MultiLevelPhotometricLoss(ncc_patch_size=ncc_patch_size, rngs=rngs,
+                                               alpha=loss_alpha, beta=loss_beta, gamma=loss_gamma)
         self.rngs = rngs
         self._patch_size = patch_size
 
+    # --- CHANGE: Update return type annotation for loss and aux ---
     def __call__(self, f1: jax.Array, f2: jax.Array, priors: jax.Array, train: bool
                  ) -> tuple[
-        Sequence[jax.Array], Sequence[jax.Array], Sequence[jax.Array], jax.Array]:
+        Sequence[jax.Array], Sequence[jax.Array], Sequence[jax.Array], jax.Array, dict
+    ]:
+
+        # --- END CHANGE ---
         pyramid1 = self._image_decomposition(f1)
         pyramid2 = self._image_decomposition(f2)
         flow_pyramid = self._layers_predictor(pyramid1, pyramid2, priors, train=train)
         loss_pyramid1 = self._get_single_channel_fine_grained_pyramid(f1, pyramid1)
         loss_pyramid2 = self._get_single_channel_fine_grained_pyramid(f2, pyramid2)
-        loss = self._loss(loss_pyramid1, loss_pyramid2, flow_pyramid)
-        return pyramid1, pyramid2, flow_pyramid, loss
 
-    def _get_single_channel_fine_grained_pyramid(self, frame: jax.Array, pyramid: Sequence[
-        jax.Array]) -> Sequence[jax.Array]:
-        output = [frame[:,0]]
-        for level in pyramid[:-1]: # we won't use the last level since we're shifting up by 1.
-            output.append(level[:,0]) # take first channel from each decomposition level batch
-        return output
+        # --- CHANGE: Unpack loss and auxiliary data dict ---
+        loss, aux_data = self._loss(loss_pyramid1, loss_pyramid2, flow_pyramid)
+        # --- END CHANGE ---
 
+        # --- CHANGE: Return auxiliary data dict ---
+        return pyramid1, pyramid2, flow_pyramid, loss, aux_data
+
+
+    def _get_single_channel_fine_grained_pyramid(self, original_frame: jax.Array,
+                                                 dwt_pyramid_raw: Sequence[jax.Array]) -> Sequence[
+        jax.Array]:
+        """
+        Constructs the sequence of single-channel images for photometric loss calculation,
+        including the original image and subsequent LL channels from DWT levels.
+
+        Args:
+            original_frame: The initial input image (B, 1, H, W).
+            dwt_pyramid_raw: The full DWT pyramid output from ImageDecomposition,
+                             ordered finest to coarsest: [L0, L1, L2, L3, L4].
+
+        Returns:
+            A sequence of single-channel images (B, H_level, W_level), ordered
+            from finest (original) to progressively coarser DWT levels:
+            [Original_image_LL_channel, L0_LL, L1_LL, L2_LL, L3_LL].
+            Note: The coarsest DWT level (L4_LL) is excluded to match the length
+            of the flow_pyramid (which has 'levels' elements, 0 to levels-1).
+        """
+        images_for_loss = [
+            original_frame[:, 0, :, :]]  # Start with the original image's single channel (B, H, W)
+
+        # Append the LL channel from each DWT level, excluding the very coarsest one.
+        # This loop iterates 'levels - 1' times (e.g., if levels=5, then 4 times for L0, L1, L2, L3).
+        # dwt_pyramid_raw[i] will be the DWT level for L_i.
+        for i in range(
+                len(dwt_pyramid_raw) - 1):  # If dwt_pyramid_raw has 'levels' elements (L0..L_levels-1)
+            # we iterate from i=0 to i=levels-2.
+            images_for_loss.append(dwt_pyramid_raw[i][:, 0, :, :])  # Append LL channel of L_i
+
+        # Resulting list length: 1 (original image) + (levels - 1) (DWT LL levels) = levels.
+        # This matches the length of 'flow_pyramid'.
+        return images_for_loss
 
 
 ## aux
@@ -530,25 +616,27 @@ def run():
     f21 = load_image_to_array(Path('./datasets/frames/bookshelf/frame_000205.png'))
     f12 = load_image_to_array(Path('./datasets/frames/bookshelf/frame_000300.png'))
     f22 = load_image_to_array(Path('./datasets/frames/bookshelf/frame_000305.png'))
-    rngs = flax.nnx.Rngs(41)
+    # Use explicit RNG keys for clarity
+    rngs = flax.nnx.Rngs(params=41, prior=jax.random.PRNGKey(41))
 
     f1_batched = jnp.stack([f11, f12], axis=0)[:,None,:,:]
     f2_batched = jnp.stack([f21, f22], axis=0)[:,None,:,:]
-    LEVELS=5
-    PATCH_SIZE=2
+
+    # Generate dummy priors consistent with the model's expected shape for the coarsest level
+    # Use the same parameters as in train.py for consistency.
     B, _, H, W = f1_batched.shape
-    PH = H // (2 ** LEVELS) // PATCH_SIZE
-    PW = W // (2 ** LEVELS) // PATCH_SIZE
+    levels_in_run = 5 # Should match ImagePairFlowPredictor's levels
+    patch_size_in_run = 2 # Should match ImagePairFlowPredictor's patch_size
+    PH = H // (2 ** levels_in_run) // patch_size_in_run
+    PW = W // (2 ** levels_in_run) // patch_size_in_run
     dummy_priors = jax.random.normal(rngs.prior(), (B, 2, PH, PW)) * 0.01
 
-    model = ImagePairFlowPredictor(patch_size=PATCH_SIZE, channels=4, levels=LEVELS, wavelet='db2',
+    model = ImagePairFlowPredictor(patch_size=patch_size_in_run, channels=4, levels=levels_in_run, wavelet='db2',
                                    ncc_patch_size=4,rngs=rngs)
-    return model(f1_batched, f2_batched, train=False)
-
-
+    # Pass the dummy prior
+    return model(f1_batched, f2_batched, priors=dummy_priors, train=False)
 
 if __name__ == '__main__':
     pyramid1, pyramid2, flow_pyramid, loss = run()
     print("Flow pyramid shapes (finest to coarsest):", [p.shape for p in flow_pyramid])
-    print("Dummy Loss:", loss)
-
+    print("Total Loss (scalar):", loss)
