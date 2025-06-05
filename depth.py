@@ -102,7 +102,6 @@ class PatchFlowPredictor(nnx.Module):
 
     def __call__(self, patch1: jax.Array, patch2: jax.Array, prior_flow: jax.Array,
                  train: bool = False):
-        # Input shapes:
         # patch1: (B, C, P, P)
         # patch2: (B, C, P, P)
         # prior_flow: (B, 2)
@@ -117,10 +116,7 @@ class PatchFlowPredictor(nnx.Module):
 
         # x.shape: [B, 2*C+2, P, P]
 
-        # 2. Convolutional Head
         x = self.conv1x1(x_transposed)
-        # For nnx.BatchNorm, `use_running_average` is passed directly to the `__call__` method.
-        # If `train=True`, batch stats are updated; if `train=False`, running averages are used.
         x = self.bn1(x, use_running_average=not train)
         x = nnx.relu(x)  # Shape: (1, P, P, num_features_conv1) -> e.g., (1, 2, 2, 8)
 
@@ -128,11 +124,8 @@ class PatchFlowPredictor(nnx.Module):
         x = self.bn2(x, use_running_average=not train)
         x = nnx.relu(x)  # Shape: (1, 1, 1, num_features_conv2) -> e.g., (1, 1, 1, 16)
 
-        # Remove dummy batch dimension and flatten for MLP
-        # Squeezing removes all 1-sized dimensions. Result: (num_features_conv2,)
         x = x.squeeze((1, 2))  # Shape: (num_features_conv2,) -> e.g., (16,)
 
-        # 3. MLP Tail
         x = self.mlp_hidden(x)
         x = nnx.relu(x)  # Shape: (mlp_hidden_size,) -> e.g., (16,)
 

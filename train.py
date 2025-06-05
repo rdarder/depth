@@ -1,4 +1,5 @@
 from functools import partial
+from pathlib import Path
 
 import jax
 import jax.numpy as jnp
@@ -7,10 +8,10 @@ import flax.nnx as nnx
 
 from datetime import datetime
 
-from flax.training import train_state
 from tensorboardX import SummaryWriter  # For TensorBoard logging
 import os
-import numpy as np  # For converting tf.data.Dataset outputs to numpy arrays
+import orbax
+from flax.training import orbax_utils
 
 # Import your custom modules
 from depth import ImagePairFlowPredictor  # Your model
@@ -18,9 +19,9 @@ import datasets as custom_datasets  # Your dataset loading utility
 
 # --- Training Configuration ---
 LEARNING_RATE = 1e-4
-NUM_EPOCHS = 50
+NUM_EPOCHS = 1
 LOG_DIR = "./runs"  # TensorBoard logs will be saved here
-# MODEL_DIR = "./checkpoints" # Optional: Directory for saving model checkpoints
+MODEL_DIR = Path("./checkpoints") # Directory for saving model checkpoints
 
 # Dataset specific configurations (from datasets.py, can be overridden here)
 DATASET_ROOT = custom_datasets.DATASET_DIR
@@ -62,7 +63,7 @@ def train_step(model: ImagePairFlowPredictor, optimizer: nnx.Optimizer,
 
     Returns:
         - The scalar loss value for the current batch.
-        - The auxiliary data (list of weights).
+        - The auxiliary data dictionary.
         - The updated nnx.Optimizer (implicitly returned as nnx updates state in place).
     """
     # Use nnx.value_and_grad with has_aux=True
@@ -72,18 +73,18 @@ def train_step(model: ImagePairFlowPredictor, optimizer: nnx.Optimizer,
     return loss, aux
 
 
-# --- END CHANGE ---
-
-
 def main():
     current_time = datetime.now().strftime("%Y%m%d-%H%M%S")
+    # --- Use same timestamp for logs and checkpoints for easy correlation ---
     log_path = os.path.join(LOG_DIR, current_time)
+    os.makedirs(MODEL_DIR, exist_ok=True) # Ensure checkpoint directory exists
+    checkpoint_dir = MODEL_DIR / current_time
+    # --- END CHANGE ---
+
     writer = SummaryWriter(log_path)
     print("Initializing model and optimizer...")
     rngs = nnx.Rngs(params=0, prior=jax.random.PRNGKey(0))
 
-    # --- CHANGE: Pass loss hyperparameters to model init ---
-    # Use default values for now, these can be added to config later
     model = ImagePairFlowPredictor(
         patch_size=PATCH_SIZE,
         channels=CHANNELS,
@@ -91,17 +92,18 @@ def main():
         wavelet=WAVELET,
         ncc_patch_size=NCC_PATCH_SIZE,
         rngs=rngs,
-        loss_alpha=5.0,  # Default alpha
-        loss_beta=1.0,  # Default beta
-        loss_gamma=1.0  # Default gamma for coarsest level
+        loss_alpha=5.0,
+        loss_beta=1.0,
+        loss_gamma=1.0
     )
-    # --- END CHANGE ---
 
-    # Add gradient clipping (as previously discussed and implemented)
     optimizer = nnx.Optimizer(model, optax.chain(
-        optax.clip_by_global_norm(1.0),  # Clip gradients by global norm of 1.0
+        optax.clip_by_global_norm(1.0),
         optax.adam(learning_rate=LEARNING_RATE)
     ))
+
+    orbax_checkpointer = orbax.checkpoint.StandardCheckpointer()
+
 
     print("loading dataset")
     frame_pairs = custom_datasets.get_consecutive_frame_pairs(DATASET_ROOT, IMAGE_EXTENSION)
@@ -116,55 +118,60 @@ def main():
 
     print("Starting training loop...")
     global_step = 0
-    # --- CHANGE: Iterate over dataset directly (it's iterable) ---
     for epoch in range(NUM_EPOCHS):
         print(f"Epoch {epoch + 1}/{NUM_EPOCHS}")
 
-        # --- CHANGE: Handle auxiliary output from train_step ---
         for batch_idx, (f1_np, f2_np) in enumerate(train_dataset):
-            f1_jax = jnp.array(f1_np).transpose(0, 3, 1, 2)  # From (B, H, W, C) to (B, C, H, W)
+            f1_jax = jnp.array(f1_np).transpose(0, 3, 1, 2)
             f2_jax = jnp.array(f2_np).transpose(0, 3, 1, 2)
 
             priors = generate_random_priors(f1_jax.shape, LEVELS, PATCH_SIZE, rngs)
 
-            # train_step returns (loss, weights)
             loss_value, aux_data = train_step(model, optimizer, f1_jax, f2_jax, priors)
 
             # Check for NaN/Inf loss (optional, but good for debugging)
             if not jnp.isfinite(loss_value):
                 print(f"Warning: NaN or Inf loss detected at step {global_step}. Exiting training.")
-                break
+                # --- Optional: Save state just before NaN if possible (more complex) ---
+                # For now, we exit and save the last valid state if needed.
+                break # Exit inner loop
 
-                # Log loss and weights
             if global_step % 10 == 0:
                 writer.add_scalar("train_loss", loss_value, global_step)
-                print(f"Step {global_step}, Loss: {loss_value:.4f}")
+                print(f"Step {global_step}, Total Weighted Loss: {loss_value:.4f}")
 
-                weights = aux_data['weights']  # List of (B,) arrays
+                # Log mean weight per level
+                weights = aux_data['weights'] # List of (B,) arrays
                 for level_idx, level_weights_batch in enumerate(weights):
-                    mean_weight = jnp.mean(level_weights_batch)  # Mean across the batch
-                    writer.add_scalar(f"level_train_weight/{level_idx}", mean_weight,
+                    mean_weight = jnp.mean(level_weights_batch) # Mean across the batch
+                    # Use clear, consistent logging tags
+                    writer.add_scalar(f"train_weight_levels/{level_idx}", mean_weight,
                                       global_step)
 
                 # Log average unweighted loss per level
                 mean_unweighted_losses = aux_data[
                     'mean_unweighted_losses_per_level']  # (N_Levels,) array
                 for level_idx, mean_unweighted_loss in enumerate(mean_unweighted_losses):
-                    writer.add_scalar(f"unweighted_train_loss_level/{level_idx}",
+                     # Use clear, consistent logging tags
+                    writer.add_scalar(f"train_loss_levels/{level_idx}",
                                       mean_unweighted_loss, global_step)
 
             global_step += 1
-        # Check for NaN/Inf after inner loop
         if not jnp.isfinite(loss_value):
-            break
-        # --- END CHANGE ---
+            break # Exit outer loop due to NaN
 
     print("Training finished.")
     writer.close()
     print("TensorBoard writer closed.")
 
+    checkpoint = nnx.state(optimizer)
+    orbax_checkpointer.save(checkpoint_dir.absolute() / 'final.orbax', checkpoint)
+    orbax_checkpointer.wait_until_finished()
+    print("Checkpoint saving complete.")
+    # --- END NEW ---
 
-def generate_random_priors(input_shape, levels, patch_size, rngs):
+
+def generate_random_priors(input_shape, levels, patch_size, rngs: nnx.Rngs):
     B, _, H, W = input_shape
     PH = H // (2 ** levels) // patch_size
     PW = W // (2 ** levels) // patch_size
@@ -175,3 +182,5 @@ def generate_random_priors(input_shape, levels, patch_size, rngs):
 
 if __name__ == "__main__":
     main()
+
+# --- END OF FILE train.py ---
