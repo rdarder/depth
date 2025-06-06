@@ -34,14 +34,14 @@ BATCH_SIZE = 100
 # Model specific configurations (from depth.py)
 PATCH_SIZE = 2  # Patch size for flow estimation (within DWT levels)
 CHANNELS = 4  # Number of channels from DWT output
-LEVELS = 5  # Number of DWT levels
+LEVELS = 6  # Number of DWT levels
 WAVELET = 'db2'
 NCC_PATCH_SIZE = 4  # Patch size for photometric loss (on finer/original resolution)
 
 
 def loss_fn(model, f1, f2, priors):
     # model now returns (pyramid1, pyramid2, flow_pyramid, loss, weights)
-    pyramid1, pyramid2, flow_pyramid, loss, aux_data = model(
+    pyramid1, pyramid2, flow_pyramid, loss, aux_data, per_patch_loss_maps = model(
         f1=f1, f2=f2, priors=priors, train=True
     )
     # Return loss and weights (auxiliary data)
@@ -92,7 +92,7 @@ def main():
         wavelet=WAVELET,
         ncc_patch_size=NCC_PATCH_SIZE,
         rngs=rngs,
-        loss_alpha=5.0,
+        loss_alpha=2.0,
         loss_beta=1.0,
         loss_gamma=1.0
     )
@@ -164,11 +164,10 @@ def main():
     writer.close()
     print("TensorBoard writer closed.")
 
-    checkpoint = nnx.state(optimizer)
-    orbax_checkpointer.save(checkpoint_dir.absolute() / 'final.orbax', checkpoint)
+    model_state = nnx.state(model)
+    orbax_checkpointer.save(checkpoint_dir.absolute() / 'final', model_state)
     orbax_checkpointer.wait_until_finished()
     print("Checkpoint saving complete.")
-    # --- END NEW ---
 
 
 def generate_random_priors(input_shape, levels, patch_size, rngs: nnx.Rngs):
