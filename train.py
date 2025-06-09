@@ -23,7 +23,7 @@ MAX_FRAMES_LOOKAHEAD=5
 
 LEARNING_RATE = 1e-4
 NUM_EPOCHS = 100
-BATCH_SIZE = 100
+BATCH_SIZE = 10
 
 PATCH_SIZE = 2
 NCC_PATCH_SIZE = 4
@@ -106,31 +106,32 @@ def main():
     print("Starting training loop...")
     print(f"{len(train_dataset)} frame pairs on {BATCH_SIZE} size batches over {NUM_EPOCHS} epochs")
 
-    for step, (f1_jax, f2_jax) in enumerate(train_dataset):
+    for epoch in range(NUM_EPOCHS):
+        for step, (f1_jax, f2_jax) in enumerate(train_dataset):
 
-        priors = generate_random_priors(f1_jax.shape, LEVELS, PATCH_SIZE, rngs)
-        loss_value, aux_data = train_step(model, optimizer, f1_jax, f2_jax, priors)
+            priors = generate_random_priors(f1_jax.shape, LEVELS, PATCH_SIZE, rngs)
+            loss_value, aux_data = train_step(model, optimizer, f1_jax, f2_jax, priors)
 
-        if not jnp.isfinite(loss_value):
-            print(f"Warning: NaN or Inf loss detected at step {step}. Exiting training.")
-            break
+            if not jnp.isfinite(loss_value):
+                print(f"Warning: NaN or Inf loss detected at step {step}. Exiting training.")
+                break
 
-        if step % 100 == 0:
-            writer.add_scalar("train_loss", loss_value, step)
-            print(f"Step {step}, Total Weighted Loss: {loss_value:.4f}")
+            if step % 100 == 0:
+                writer.add_scalar("train_loss", loss_value, step)
+                print(f"Step {step}, Total Weighted Loss: {loss_value:.4f}")
 
-            weights = aux_data['weights'] # List of (B,) arrays
-            for level_idx, level_weights_batch in enumerate(weights):
-                mean_weight = jnp.mean(level_weights_batch) # Mean across the batch
-                # Use clear, consistent logging tags
-                writer.add_scalar(f"train_weight_levels/{level_idx}",
-                                  mean_weight, step)
+                weights = aux_data['weights'] # List of (B,) arrays
+                for level_idx, level_weights_batch in enumerate(weights):
+                    mean_weight = jnp.mean(level_weights_batch) # Mean across the batch
+                    # Use clear, consistent logging tags
+                    writer.add_scalar(f"train_weight_levels/{level_idx}",
+                                      mean_weight, step)
 
-            mean_unweighted_losses = aux_data[
-                'mean_unweighted_losses_per_level']  # (N_Levels,) array
-            for level_idx, mean_unweighted_loss in enumerate(mean_unweighted_losses):
-                 # Use clear, consistent logging tags
-                writer.add_scalar(f"train_loss_levels/{level_idx}", mean_unweighted_loss, step)
+                mean_unweighted_losses = aux_data[
+                    'mean_unweighted_losses_per_level']  # (N_Levels,) array
+                for level_idx, mean_unweighted_loss in enumerate(mean_unweighted_losses):
+                     # Use clear, consistent logging tags
+                    writer.add_scalar(f"train_loss_levels/{level_idx}", mean_unweighted_loss, step)
 
     print("Training finished.")
     writer.close()
