@@ -518,7 +518,7 @@ class MultiLevelPhotometricLoss(nnx.Module):
 
 
         aux_data = {
-            'weights': normalized_weights,  # List of (B,) arrays, ordered finest to coarsest
+            'weights': raw_weights,  # List of (B,) arrays, ordered finest to coarsest
             'mean_unweighted_losses_per_level': average_unweighted_losses_per_level
             # (N_Levels,) array
         }
