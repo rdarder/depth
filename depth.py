@@ -6,6 +6,7 @@ from PIL import Image
 import pywt
 import jax
 import jax.numpy as jnp
+from jax.nn import softmax
 from jax.scipy.ndimage import map_coordinates
 from flax import nnx
 
@@ -487,12 +488,10 @@ class MultiLevelPhotometricLoss(nnx.Module):
         baselines = jnp.concatenate([average_unweighted_losses_per_level[1:],
                                     average_unweighted_losses_per_level[-1:]])
 
-        relative_losses = average_unweighted_losses_per_level / baselines
-        weights = relative_losses / jnp.sum(relative_losses)
+        relative_losses = average_unweighted_losses_per_level - baselines
+        weights = softmax(relative_losses)
 
-        weighted_average_losses = average_unweighted_losses_per_level * weights
-
-        final_scalar_loss = jnp.sum(weighted_average_losses)
+        final_scalar_loss = jnp.sum(average_unweighted_losses_per_level[0])
 
         aux_data = {
             'weights': weights,  # List of (B,) arrays, ordered finest to coarsest
