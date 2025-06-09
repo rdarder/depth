@@ -21,7 +21,7 @@ TRAIN_DATASET_ROOT = Path('datasets/frames')
 MAX_FRAMES_LOOKAHEAD = 5
 
 LEARNING_RATE = 1e-4
-NUM_EPOCHS = 200
+NUM_EPOCHS = 100
 BATCH_SIZE = 10
 
 PATCH_SIZE = 2
@@ -117,7 +117,7 @@ def main():
                 print(f"Warning: NaN or Inf loss detected at step {step}. Exiting training.")
                 break
 
-            if step % 100 == 0:
+            if global_step % 10 == 0:
                 writer.add_scalar("train_loss", loss_value, global_step)
                 print(f"Step {global_step}, Total Weighted Loss: {loss_value:.4f}")
 
