@@ -485,29 +485,40 @@ class MultiLevelPhotometricLoss(nnx.Module):
         average_unweighted_losses_per_level = jnp.mean(stacked_mean_losses, axis=1)  # (N_Levels,)
 
         # Implement loss weighting (remains the same)
-        weights = []
+        raw_weights = []
         num_levels = len(mean_level_losses_per_batch_item)
 
         for i in range(num_levels - 1):
             weight_i = jax.nn.sigmoid(
                 self._beta - self._alpha * stacked_mean_losses[i + 1, :])  # (B,)
-            weights.append(weight_i)
+            raw_weights.append(weight_i)
 
         coarsest_level_weight = jnp.full_like(stacked_mean_losses[num_levels - 1, :],
                                               self._gamma)  # (B,)
-        weights.append(coarsest_level_weight)
+        raw_weights.append(coarsest_level_weight)
 
         # Stack weights to (Num_Levels, B)
-        stacked_weights = jnp.stack(weights, axis=0)  # (N_Levels, B)
+        stacked_raw_weights = jnp.stack(raw_weights, axis=0)  # (N_Levels, B)
 
-        # Compute total weighted loss per batch item: sum(weight * mean_loss) over levels
-        total_loss_per_batch_item = jnp.sum(stacked_weights * stacked_mean_losses, axis=0)  # (B,)
+        # Calculate the sum of raw weights for each batch item
+        sum_of_raw_weights_per_batch_item = jnp.sum(stacked_raw_weights, axis=0, keepdims=True) # (1, B)
+
+        # Add a small epsilon for numerical stability to avoid division by zero if all weights are somehow zero
+        sum_of_raw_weights_per_batch_item += 1e-6
+
+        # Normalize weights PER BATCH ITEM
+        # This divides each weight w_i[b] by Sum_j(w_j[b]) for each batch item b
+        normalized_weights = stacked_raw_weights / sum_of_raw_weights_per_batch_item # (N_Levels, B)
+
+        # --- Compute total weighted loss per batch item using NORMALIZED weights ---
+        total_weighted_average_loss_per_batch_item = jnp.sum(normalized_weights * stacked_mean_losses, axis=0)  # (B,)
 
         # Average across the batch to get a single scalar loss
-        final_scalar_loss = jnp.mean(total_loss_per_batch_item, axis=0)  # Scalar
+        final_scalar_loss = jnp.mean(total_weighted_average_loss_per_batch_item, axis=0)  # Scalar
+
 
         aux_data = {
-            'weights': weights,  # List of (B,) arrays, ordered finest to coarsest
+            'weights': normalized_weights,  # List of (B,) arrays, ordered finest to coarsest
             'mean_unweighted_losses_per_level': average_unweighted_losses_per_level
             # (N_Levels,) array
         }
