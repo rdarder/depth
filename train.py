@@ -1,4 +1,3 @@
-from functools import partial
 from pathlib import Path
 
 import jax
@@ -8,43 +7,34 @@ import flax.nnx as nnx
 
 from datetime import datetime
 
-from tensorboardX import SummaryWriter  # For TensorBoard logging
+from tensorboardX import SummaryWriter
 import os
-import orbax
-from flax.training import orbax_utils
+import orbax.checkpoint
 
-# Import your custom modules
-from depth import ImagePairFlowPredictor  # Your model
-import datasets as custom_datasets  # Your dataset loading utility
+from datasets import FrameSource, FramePairsDataset
+from depth import ImagePairFlowPredictor
 
-# --- Training Configuration ---
+
+TENSORBOARD_LOGS = "./runs"
+CHECKPOINTS_DIR = Path("./checkpoints")
+
+TRAIN_DATASET_ROOT = Path('datasets/frames')
+MAX_FRAMES_LOOKAHEAD=5
+
 LEARNING_RATE = 1e-4
-NUM_EPOCHS = 1
-LOG_DIR = "./runs"  # TensorBoard logs will be saved here
-MODEL_DIR = Path("./checkpoints") # Directory for saving model checkpoints
-
-# Dataset specific configurations (from datasets.py, can be overridden here)
-DATASET_ROOT = custom_datasets.DATASET_DIR
-IMAGE_EXTENSION = custom_datasets.IMAGE_EXTENSION
-TARGET_IMG_HEIGHT = custom_datasets.TARGET_IMG_HEIGHT
-TARGET_IMG_WIDTH = custom_datasets.TARGET_IMG_WIDTH
-SHUFFLE_BUFFER_SIZE = custom_datasets.SHUFFLE_BUFFER_SIZE
+NUM_EPOCHS = 100
 BATCH_SIZE = 100
 
-# Model specific configurations (from depth.py)
-PATCH_SIZE = 2  # Patch size for flow estimation (within DWT levels)
-CHANNELS = 4  # Number of channels from DWT output
-LEVELS = 6  # Number of DWT levels
+PATCH_SIZE = 2
+NCC_PATCH_SIZE = 4
+CHANNELS = 4
+LEVELS = 6
 WAVELET = 'db2'
-NCC_PATCH_SIZE = 4  # Patch size for photometric loss (on finer/original resolution)
-
 
 def loss_fn(model, f1, f2, priors):
-    # model now returns (pyramid1, pyramid2, flow_pyramid, loss, weights)
     pyramid1, pyramid2, flow_pyramid, loss, aux_data, per_patch_loss_maps = model(
         f1=f1, f2=f2, priors=priors, train=True
     )
-    # Return loss and weights (auxiliary data)
     return loss, aux_data
 
 
@@ -66,19 +56,17 @@ def train_step(model: ImagePairFlowPredictor, optimizer: nnx.Optimizer,
         - The auxiliary data dictionary.
         - The updated nnx.Optimizer (implicitly returned as nnx updates state in place).
     """
-    # Use nnx.value_and_grad with has_aux=True
     (loss, aux), grads = nnx.value_and_grad(loss_fn, has_aux=True)(model, f1, f2, priors)
-    optimizer.update(grads)  # nnx.Optimizer updates the model in-place
-    # Return loss and auxiliary data
+    optimizer.update(grads)
     return loss, aux
 
 
 def main():
     current_time = datetime.now().strftime("%Y%m%d-%H%M%S")
     # --- Use same timestamp for logs and checkpoints for easy correlation ---
-    log_path = os.path.join(LOG_DIR, current_time)
-    os.makedirs(MODEL_DIR, exist_ok=True) # Ensure checkpoint directory exists
-    checkpoint_dir = MODEL_DIR / current_time
+    log_path = os.path.join(TENSORBOARD_LOGS, current_time)
+    os.makedirs(CHECKPOINTS_DIR, exist_ok=True) # Ensure checkpoint directory exists
+    checkpoint_dir = CHECKPOINTS_DIR / current_time
     # --- END CHANGE ---
 
     writer = SummaryWriter(log_path)
@@ -104,65 +92,48 @@ def main():
 
     orbax_checkpointer = orbax.checkpoint.StandardCheckpointer()
 
-
     print("loading dataset")
-    frame_pairs = custom_datasets.get_consecutive_frame_pairs(DATASET_ROOT, IMAGE_EXTENSION)
-    train_dataset = custom_datasets.create_dataset(
-        frame_pairs,
-        target_height=TARGET_IMG_HEIGHT,
-        target_width=TARGET_IMG_WIDTH,
+    source = FrameSource(Path('datasets/frames').glob('*'), cache_size=10_000)
+    train_dataset = FramePairsDataset(
+        source,
         batch_size=BATCH_SIZE,
-        shuffle_buffer_size=SHUFFLE_BUFFER_SIZE,
-        is_training=True,
+        max_frame_lookahead=MAX_FRAMES_LOOKAHEAD,
+        include_reversed_pairs=True,
+        drop_uneven_batches=True,
+        seed=0
     )
 
     print("Starting training loop...")
-    global_step = 0
-    for epoch in range(NUM_EPOCHS):
-        print(f"Epoch {epoch + 1}/{NUM_EPOCHS}")
+    print(f"{len(train_dataset)} frame pairs on {BATCH_SIZE} size batches over {NUM_EPOCHS} epochs")
 
-        for batch_idx, (f1_np, f2_np) in enumerate(train_dataset):
-            f1_jax = jnp.array(f1_np).transpose(0, 3, 1, 2)
-            f2_jax = jnp.array(f2_np).transpose(0, 3, 1, 2)
+    for step, (f1_jax, f2_jax) in enumerate(train_dataset):
 
-            priors = generate_random_priors(f1_jax.shape, LEVELS, PATCH_SIZE, rngs)
+        priors = generate_random_priors(f1_jax.shape, LEVELS, PATCH_SIZE, rngs)
+        loss_value, aux_data = train_step(model, optimizer, f1_jax, f2_jax, priors)
 
-            loss_value, aux_data = train_step(model, optimizer, f1_jax, f2_jax, priors)
-
-            # Check for NaN/Inf loss (optional, but good for debugging)
-            if not jnp.isfinite(loss_value):
-                print(f"Warning: NaN or Inf loss detected at step {global_step}. Exiting training.")
-                # --- Optional: Save state just before NaN if possible (more complex) ---
-                # For now, we exit and save the last valid state if needed.
-                break # Exit inner loop
-
-            if global_step % 10 == 0:
-                writer.add_scalar("train_loss", loss_value, global_step)
-                print(f"Step {global_step}, Total Weighted Loss: {loss_value:.4f}")
-
-                # Log mean weight per level
-                weights = aux_data['weights'] # List of (B,) arrays
-                for level_idx, level_weights_batch in enumerate(weights):
-                    mean_weight = jnp.mean(level_weights_batch) # Mean across the batch
-                    # Use clear, consistent logging tags
-                    writer.add_scalar(f"train_weight_levels/{level_idx}", mean_weight,
-                                      global_step)
-
-                # Log average unweighted loss per level
-                mean_unweighted_losses = aux_data[
-                    'mean_unweighted_losses_per_level']  # (N_Levels,) array
-                for level_idx, mean_unweighted_loss in enumerate(mean_unweighted_losses):
-                     # Use clear, consistent logging tags
-                    writer.add_scalar(f"train_loss_levels/{level_idx}",
-                                      mean_unweighted_loss, global_step)
-
-            global_step += 1
         if not jnp.isfinite(loss_value):
-            break # Exit outer loop due to NaN
+            print(f"Warning: NaN or Inf loss detected at step {step}. Exiting training.")
+            break
+
+        if step % 100 == 0:
+            writer.add_scalar("train_loss", loss_value, step)
+            print(f"Step {step}, Total Weighted Loss: {loss_value:.4f}")
+
+            weights = aux_data['weights'] # List of (B,) arrays
+            for level_idx, level_weights_batch in enumerate(weights):
+                mean_weight = jnp.mean(level_weights_batch) # Mean across the batch
+                # Use clear, consistent logging tags
+                writer.add_scalar(f"train_weight_levels/{level_idx}",
+                                  mean_weight, step)
+
+            mean_unweighted_losses = aux_data[
+                'mean_unweighted_losses_per_level']  # (N_Levels,) array
+            for level_idx, mean_unweighted_loss in enumerate(mean_unweighted_losses):
+                 # Use clear, consistent logging tags
+                writer.add_scalar(f"train_loss_levels/{level_idx}", mean_unweighted_loss, step)
 
     print("Training finished.")
     writer.close()
-    print("TensorBoard writer closed.")
 
     model_state = nnx.state(model)
     orbax_checkpointer.save(checkpoint_dir.absolute() / 'final', model_state)

@@ -1,218 +1,119 @@
-import glob
-import os
-import re  # For sorting frame numbers naturally
+from functools import lru_cache
+from itertools import chain, batched
+from pathlib import Path
+from random import Random
 
-import tensorflow as tf  # For tf.data and tf.image operations
+from typing import Iterable, Iterator
 
-# --- Configuration ---
-DATASET_DIR = "datasets/frames"  # Your root dataset directory
-IMAGE_EXTENSION = ".png"
-TARGET_IMG_HEIGHT = 128  # Example, adjust to your needs
-TARGET_IMG_WIDTH = 128  # Example, adjust to your needs
-SHUFFLE_BUFFER_SIZE = 50_000  # Adjust based on dataset size
-
-
-def natural_sort_key(s, _nsre=re.compile("([0-9]+)")):
-    """Key for natural sorting of strings containing numbers."""
-    return [int(text) if text.isdigit() else text.lower() for text in _nsre.split(s)]
+import cv2
+from dataclasses import dataclass
+import jax.numpy as jnp
+import jax
 
 
-def get_consecutive_frame_pairs(
-    dataset_root: str, image_extension: str
-) -> list[tuple[str, str]]:
-    """
-    Scans the dataset directory to find pairs of consecutive frames.
-
-    Args:
-        dataset_root: Path to the root directory containing video subfolders.
-        image_extension: The file extension of the frame images (e.g., ".png").
-
-    Returns:
-        A list of tuples, where each tuple is (path_to_frame_n, path_to_frame_n_plus_1).
-    """
-    all_frame_pairs = []
-    video_folders = [
-        os.path.join(dataset_root, d)
-        for d in os.listdir(dataset_root)
-        if os.path.isdir(os.path.join(dataset_root, d))
-    ]
-
-    for video_folder in video_folders:
-        frame_files = glob.glob(os.path.join(video_folder, f"frame_*{image_extension}"))
-        frame_files.sort(key=natural_sort_key)  # Sort frames numerically
-
-        if len(frame_files) < 2:
-            print(
-                f"Warning: Not enough frames in {video_folder} to form pairs. Skipping."
-            )
-            continue
-        for skip in range(1, 8):
-            for i in range(len(frame_files) - skip):
-                frame_n_path = frame_files[i]
-                frame_skip_ahead = frame_files[i + skip]
-                all_frame_pairs.append((frame_n_path, frame_skip_ahead))
-                all_frame_pairs.append((frame_skip_ahead, frame_n_path))
-
-    print(f"Found {len(all_frame_pairs)} consecutive frame pairs.")
-    return all_frame_pairs
+@dataclass(frozen=True)
+class FrameMetadata:
+    video: str
+    filename: str
 
 
-def load_and_preprocess_image_pair(
-    path_t: tf.Tensor, path_t_plus_1: tf.Tensor, target_height: int, target_width: int
-) -> tuple[tf.Tensor, tf.Tensor]:
-    """
-    Loads a single pair of images from their paths, decodes, resizes, and normalizes.
-    """
-
-    def _load_image(path_tensor):
-        img_raw = tf.io.read_file(path_tensor)
-        img = tf.image.decode_png(img_raw, channels=1)  # Grayscale
-        img = tf.image.convert_image_dtype(img, tf.float32)  # Normalize to [0,1]
-        img = tf.image.resize(
-            img, [target_height, target_width], method=tf.image.ResizeMethod.BILINEAR
-        )  # or NEAREST
-        return img
-
-    img_t = _load_image(path_t)
-    img_t_plus_1 = _load_image(path_t_plus_1)
-
-    return img_t, img_t_plus_1
+def load_frame_from_path(frame_path: str):
+    img = cv2.imread(frame_path, cv2.IMREAD_GRAYSCALE)
+    as_array = jnp.asarray(img)
+    assert as_array.ndim == 2
+    normalized = as_array / 255.0
+    with_channel_dimension = normalized[None, :, :]
+    return with_channel_dimension
 
 
-def create_dataset(
-    frame_pairs_list: list[tuple[str, str]],
-    target_height: int,
-    target_width: int,
-    batch_size: int,
-    shuffle_buffer_size: int,
-    is_training: bool = True,
-) -> tf.data.Dataset:
-    """
-    Creates a tf.data.Dataset for optical flow training.
-    """
-    path_t_list, path_t_plus_1_list = zip(*frame_pairs_list)
+class FrameSource:
+    def __init__(self, folders: Iterable[Path], cache_size: int = 0):
+        self.frames = self.discover_video_frames(sorted(folders))
+        if cache_size > 0:
+            self.loader = lru_cache(maxsize=cache_size)(load_frame_from_path)
+        else:
+            self.loader = load_frame_from_path
 
-    dataset = tf.data.Dataset.from_tensor_slices(
-        (list(path_t_list), list(path_t_plus_1_list))
+    def discover_video_frames(self, folders: Iterable[Path]):
+        global_index = 0
+        all_frame_metadata = []
+        for folder in folders:
+            frame_paths = sorted(folder.glob("*.png"))
+            for local_idx, path in enumerate(frame_paths, start=1):
+                frame = FrameMetadata(video=str(path.parent), filename=path.name)
+                all_frame_metadata.append(frame)
+                global_index += 1
+        return all_frame_metadata
+
+    def make_frame_pairs(self, max_frame_lookahead=1) -> Iterable[tuple[int, int]]:
+        for i in range(len(self.frames)):
+            for j in range(max_frame_lookahead):
+                target = i + j + 1
+                if target < len(self.frames) and self.frames[target].video == self.frames[i].video:
+                    yield (i, target)
+
+    def add_reversed_pairs(self, frame_pairs: Iterable[tuple[int, int]]) -> (
+            Iterable[tuple[int, int]]):
+        for pair in frame_pairs:
+            yield pair
+            yield (pair[1], pair[0])
+
+    def load_single_frame(self, frame_idx: int) -> jax.Array:
+        frame_metadata = self.frames[frame_idx]
+        frame_path = f"{frame_metadata.video}/{frame_metadata.filename}"
+        return self.loader(frame_path)
+
+    def load_frame_pair(self, pair: tuple[int, int]):
+        return self.load_single_frame(pair[0]), self.load_single_frame(pair[1])
+
+
+class FramePairsDataset:
+    def __init__(self, source: FrameSource, batch_size: int = 10, max_frame_lookahead=1,
+                 include_reversed_pairs=True, drop_uneven_batches=False, seed: int = 0):
+        self._source = source
+        self._batch_size = batch_size
+        self._max_frame_lookahead = max_frame_lookahead
+        self._include_reversed_pairs = include_reversed_pairs
+        self._random = Random(seed)
+        self._drop_uneven_batches = drop_uneven_batches
+        self._frame_pairs = list(self._make_frame_pairs())
+
+    def _make_frame_pairs(self):
+        frame_pairs = self._source.make_frame_pairs(self._max_frame_lookahead)
+        if self._include_reversed_pairs:
+            frame_pairs = self._source.add_reversed_pairs(frame_pairs)
+        return frame_pairs
+
+    def __len__(self):
+        return len(self._frame_pairs)
+
+    def __iter__(self) -> Iterator[jax.Array]:
+        shuffled_pairs = self._random.sample(self._frame_pairs, len(self._frame_pairs))
+        for batch in batched(shuffled_pairs, self._batch_size):
+            if self._drop_uneven_batches and len(batch) < self._batch_size:
+                break
+            loaded_pairs = [self._source.load_frame_pair(pair) for pair in batch]
+            batch_array = jnp.array(loaded_pairs).transpose(1, 0, 2, 3, 4)
+            yield batch_array
+
+def sample_run():
+    source = FrameSource(Path('datasets/frames').glob('*'), cache_size=10_000)
+    dataset = FramePairsDataset(
+        source,
+        batch_size=100,
+        max_frame_lookahead=5,
+        include_reversed_pairs=True,
+        drop_uneven_batches=True,
+        seed=0
     )
+    print(f'dataset length: {len(dataset)}')
+    for i in range(10):
+        print(f"epoch {i}")
+        for j, f in enumerate(dataset):
+            if i == 0 and j == 0:
+                print(f"frame batch shape: {f.shape}")
+            if j % 100 == 0:
+                print(f"batch {j}")
 
-    if is_training:
-        dataset = dataset.shuffle(shuffle_buffer_size)
-
-    # Load and preprocess images
-    dataset = dataset.map(
-        lambda path_t, path_t_plus_1: load_and_preprocess_image_pair(
-            path_t, path_t_plus_1, target_height, target_width
-        ),
-        num_parallel_calls=tf.data.AUTOTUNE,
-    )
-
-    # TODO: Add augmentations here if needed (e.g., random flip, time reversal)
-
-    dataset = dataset.batch(batch_size)
-    dataset = dataset.prefetch(buffer_size=tf.data.AUTOTUNE)
-
-    return dataset
-
-
-# if __name__ == "__main__":
-#     # --- Create dummy dataset for testing ---
-#     dummy_dataset_root = "datasets_dummy"
-#     if not os.path.exists(dummy_dataset_root):
-#         os.makedirs(dummy_dataset_root)
-#
-#     for video_name in ["video1", "video2"]:
-#         video_path = os.path.join(dummy_dataset_root, video_name)
-#         if not os.path.exists(video_path):
-#             os.makedirs(video_path)
-#         for i in range(1, 6):  # 5 frames per dummy video
-#             # Create a simple PNG file (e.g., a small gradient)
-#             try:
-#                 # For this test, we'll create actual small PNGs if tf can write them easily
-#                 # or just skip if it's too much hassle for a dummy script.
-#                 # For now, let's assume they exist or are created by your existing scripts.
-#                 # We'll just create empty files to test path finding.
-#                 dummy_frame_filename = os.path.join(
-#                     video_path, f"frame_{i:06d}{IMAGE_EXTENSION}"
-#                 )
-#                 if not os.path.exists(dummy_frame_filename):
-#                     # Create a tiny dummy PNG using tf.image.encode_png
-#                     dummy_image_tensor = tf.ones((10, 10, 1), dtype=tf.uint8) * (
-#                         i * 10
-#                     )  # Simple gradient
-#                     dummy_image_encoded = tf.image.encode_png(dummy_image_tensor)
-#                     tf.io.write_file(dummy_frame_filename, dummy_image_encoded)
-#                     # print(f"Created dummy file: {dummy_frame_filename}")
-#
-#             except Exception as e:
-#                 print(
-#                     f"Could not create dummy PNG {dummy_frame_filename}: {e}. "
-#                     "Please ensure you have a 'datasets' folder with PNGs for testing."
-#                 )
-#                 # If PNG creation fails, the glob will just find fewer/no files.
-#     # --- End dummy dataset creation ---
-#
-#     # 1. Get frame pairs
-#     frame_pairs = get_consecutive_frame_pairs(
-#         dummy_dataset_root, IMAGE_EXTENSION
-#     )  # Use dummy for test
-#     # frame_pairs = get_consecutive_frame_pairs(DATASET_DIR, IMAGE_EXTENSION) # Use this for your actual data
-#
-#     if not frame_pairs:
-#         print("No frame pairs found. Exiting test.")
-#     else:
-#         print(f"\nExample frame pair: {frame_pairs[0]}")
-#
-#         # 2. Create the tf.data.Dataset
-#         train_dataset = create_dataset(
-#             frame_pairs,
-#             target_height=TARGET_IMG_HEIGHT,
-#             target_width=TARGET_IMG_WIDTH,
-#             batch_size=BATCH_SIZE,
-#             shuffle_buffer_size=SHUFFLE_BUFFER_SIZE,
-#             is_training=True,
-#         )
-#
-#         print(f"\nDataset spec: {train_dataset.element_spec}")
-#
-#         # 3. Iterate over a few batches (as JAX would)
-#         num_batches_to_show = 2
-#         for i, (frame_t_batch, frame_t_plus_1_batch) in enumerate(
-#             train_dataset.take(num_batches_to_show)
-#         ):
-#             print(f"\nBatch {i + 1}:")
-#             print(
-#                 f"  Frame T batch shape: {frame_t_batch.shape}, dtype: {frame_t_batch.dtype}"
-#             )
-#             print(
-#                 f"  Frame T+1 batch shape: {frame_t_plus_1_batch.shape}, dtype: {frame_t_plus_1_batch.dtype}"
-#             )
-#             # In JAX training loop, you'd convert these to JAX arrays:
-#             # jax_frame_t_batch = jnp.array(frame_t_batch.numpy()) # or similar if using as_numpy_iterator
-#
-#             if i == 0 and BATCH_SIZE > 0:  # Check values for one image
-#                 print(
-#                     f"  Example pixel value from frame_t (batch 0, item 0, pixel 0,0): {frame_t_batch[0, 0, 0, 0]}"
-#                 )
-#                 print(f"  Max value in frame_t_batch: {tf.reduce_max(frame_t_batch)}")
-#                 print(f"  Min value in frame_t_batch: {tf.reduce_min(frame_t_batch)}")
-#
-#         # Example of how to get a JAX-compatible iterator
-#         print("\nGetting a JAX-compatible iterator (as_numpy_iterator):")
-#         numpy_iterator = train_dataset.as_numpy_iterator()
-#         try:
-#             np_frame_t_batch, np_frame_t_plus_1_batch = next(numpy_iterator)
-#             print(
-#                 f"  NumPy Frame T batch shape: {np_frame_t_batch.shape}, type: {type(np_frame_t_batch)}"
-#             )
-#             print(
-#                 f"  NumPy Frame T+1 batch shape: {np_frame_t_plus_1_batch.shape}, type: {type(np_frame_t_plus_1_batch)}"
-#             )
-#         except StopIteration:
-#             print("  Dataset was empty or too small for one batch.")
-#
-#     # Clean up dummy dataset (optional)
-#     # import shutil
-#     # if os.path.exists(dummy_dataset_root):
-#     #     shutil.rmtree(dummy_dataset_root)
-#     #     print(f"\nCleaned up {dummy_dataset_root}")
+if __name__ == '__main__':
+    sample_run()
