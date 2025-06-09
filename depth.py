@@ -146,7 +146,6 @@ class ImageDecomposition(nnx.Module):
         )
         self._kernels = nnx.Variable(kernels, collection='constants')
 
-
     def __call__(self, img: jnp.ndarray) -> list[jax.Array]:
         current = img
         pyramid = []
@@ -345,13 +344,8 @@ class SingleLayerFlowPredictor(nnx.Module):
 class MultiLayerFlowPredictor(nnx.Module):
 
     def __init__(self, patch_size: int, channels: int, *, rngs: nnx.Rngs):
-        smoothing_kernel = jnp.array([
-            [1, 2, 1],
-            [2, 4, 2],
-            [1, 2, 1]
-        ], dtype=jnp.float32).reshape(1, 1, 3, 3)
-        norm_smoothing_kernel = smoothing_kernel / jnp.sum(smoothing_kernel)
-        self._smoothing_kernel = nnx.Variable(norm_smoothing_kernel, collection='constants')
+        self.smoothing_layer = nnx.Conv(in_features=1, out_features=1, kernel_size=(3, 3),
+                                        padding='same', use_bias=False, rngs=rngs)
         self._patch_size = patch_size
         self._single_layer_flow_predictor = SingleLayerFlowPredictor(
             patch_size, channels, rngs=rngs
@@ -376,12 +370,10 @@ class MultiLayerFlowPredictor(nnx.Module):
         """
         B, F, H, W = a.shape  # C_flow is 2 (for dx, dy)
         assert F == 2
-        reshaped_for_conv = a.reshape(B * F, H, W)[:, jnp.newaxis, :, :]
-
-        extra_borders = jnp.pad(reshaped_for_conv,
-                                ((0, 0), (0, 0), (1, 1), (1, 1)), mode='edge')
-        smoothed_reshaped = jax.lax.conv(extra_borders, self._smoothing_kernel.value, (1, 1), 'valid')
-        smoothed = smoothed_reshaped.reshape(B, F, H, W)
+        channels_in_batch = a.reshape(B * F, H, W)[:, jnp.newaxis, :, :]
+        transposed = channels_in_batch.transpose(0, 2, 3, 1)
+        smoothed_reshaped = self.smoothing_layer(transposed)
+        smoothed = smoothed_reshaped.squeeze(-1).reshape(B, F, H, W)
         return smoothed
 
     def expand_flow_to_next_level_prior(self, level_flow: jax.Array, smooth: bool) -> jax.Array:
@@ -479,11 +471,11 @@ class MultiLevelPhotometricLoss(nnx.Module):
         jax.Array, dict[str, jax.Array | Sequence[jax.Array]]]:
         # --- CHANGE: Collect both mean and per-patch losses ---
         mean_level_losses_per_batch_item = []
-        per_patch_loss_maps = [] # List to store per-patch maps (B, PH, PW)
+        per_patch_loss_maps = []  # List to store per-patch maps (B, PH, PW)
         for f1, f2, flow_level in zip(pyramid1, pyramid2, flow):
-             mean_loss, per_patch_map = self._single_level_photometric_loss(f1, f2, flow_level)
-             mean_level_losses_per_batch_item.append(mean_loss)
-             per_patch_loss_maps.append(per_patch_map)
+            mean_loss, per_patch_map = self._single_level_photometric_loss(f1, f2, flow_level)
+            mean_level_losses_per_batch_item.append(mean_loss)
+            per_patch_loss_maps.append(per_patch_map)
         # --- END CHANGE ---
 
         # Stack the (B,) arrays from each level to get (Num_Levels, B)
@@ -541,7 +533,8 @@ class ImagePairFlowPredictor(nnx.Module):
 
     def __call__(self, f1: jax.Array, f2: jax.Array, priors: jax.Array, train: bool
                  ) -> tuple[
-        Sequence[jax.Array], Sequence[jax.Array], Sequence[jax.Array], jax.Array, dict, Sequence[jax.Array]
+        Sequence[jax.Array], Sequence[jax.Array], Sequence[jax.Array], jax.Array, dict, Sequence[
+            jax.Array]
     ]:
         pyramid1 = self._image_decomposition(f1)
         pyramid2 = self._image_decomposition(f2)
@@ -606,22 +599,24 @@ def run():
     # Use explicit RNG keys for clarity
     rngs = flax.nnx.Rngs(params=41, prior=jax.random.PRNGKey(41))
 
-    f1_batched = jnp.stack([f11, f12], axis=0)[:,None,:,:]
-    f2_batched = jnp.stack([f21, f22], axis=0)[:,None,:,:]
+    f1_batched = jnp.stack([f11, f12], axis=0)[:, None, :, :]
+    f2_batched = jnp.stack([f21, f22], axis=0)[:, None, :, :]
 
     # Generate dummy priors consistent with the model's expected shape for the coarsest level
     # Use the same parameters as in train.py for consistency.
     B, _, H, W = f1_batched.shape
-    levels_in_run = 5 # Should match ImagePairFlowPredictor's levels
-    patch_size_in_run = 2 # Should match ImagePairFlowPredictor's patch_size
+    levels_in_run = 5  # Should match ImagePairFlowPredictor's levels
+    patch_size_in_run = 2  # Should match ImagePairFlowPredictor's patch_size
     PH = H // (2 ** levels_in_run) // patch_size_in_run
     PW = W // (2 ** levels_in_run) // patch_size_in_run
     dummy_priors = jax.random.normal(rngs.prior(), (B, 2, PH, PW)) * 0.01
 
-    model = ImagePairFlowPredictor(patch_size=patch_size_in_run, channels=4, levels=levels_in_run, wavelet='db2',
-                                   ncc_patch_size=4,rngs=rngs)
+    model = ImagePairFlowPredictor(patch_size=patch_size_in_run, channels=4, levels=levels_in_run,
+                                   wavelet='db2',
+                                   ncc_patch_size=4, rngs=rngs)
     # Pass the dummy prior
     return model(f1_batched, f2_batched, priors=dummy_priors, train=False)
+
 
 if __name__ == '__main__':
     pyramid1, pyramid2, flow_pyramid, loss, aux_data, per_patch_loss_maps = run()
