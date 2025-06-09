@@ -14,12 +14,11 @@ import orbax.checkpoint
 from datasets import FrameSource, FramePairsDataset
 from depth import ImagePairFlowPredictor
 
-
 TENSORBOARD_LOGS = "./runs"
 CHECKPOINTS_DIR = Path("./checkpoints")
 
 TRAIN_DATASET_ROOT = Path('datasets/frames')
-MAX_FRAMES_LOOKAHEAD=5
+MAX_FRAMES_LOOKAHEAD = 5
 
 LEARNING_RATE = 1e-4
 NUM_EPOCHS = 100
@@ -30,6 +29,7 @@ NCC_PATCH_SIZE = 4
 CHANNELS = 4
 LEVELS = 6
 WAVELET = 'db2'
+
 
 def loss_fn(model, f1, f2, priors):
     pyramid1, pyramid2, flow_pyramid, loss, aux_data, per_patch_loss_maps = model(
@@ -65,7 +65,7 @@ def main():
     current_time = datetime.now().strftime("%Y%m%d-%H%M%S")
     # --- Use same timestamp for logs and checkpoints for easy correlation ---
     log_path = os.path.join(TENSORBOARD_LOGS, current_time)
-    os.makedirs(CHECKPOINTS_DIR, exist_ok=True) # Ensure checkpoint directory exists
+    os.makedirs(CHECKPOINTS_DIR, exist_ok=True)  # Ensure checkpoint directory exists
     checkpoint_dir = CHECKPOINTS_DIR / current_time
     # --- END CHANGE ---
 
@@ -105,8 +105,9 @@ def main():
 
     print("Starting training loop...")
     print(f"{len(train_dataset)} frame pairs on {BATCH_SIZE} size batches over {NUM_EPOCHS} epochs")
-
+    global_step = 0
     for epoch in range(NUM_EPOCHS):
+        print(f"epoch {epoch}")
         for step, (f1_jax, f2_jax) in enumerate(train_dataset):
 
             priors = generate_random_priors(f1_jax.shape, LEVELS, PATCH_SIZE, rngs)
@@ -117,21 +118,23 @@ def main():
                 break
 
             if step % 100 == 0:
-                writer.add_scalar("train_loss", loss_value, step)
-                print(f"Step {step}, Total Weighted Loss: {loss_value:.4f}")
+                writer.add_scalar("train_loss", loss_value, global_step)
+                print(f"Step {global_step}, Total Weighted Loss: {loss_value:.4f}")
 
-                weights = aux_data['weights'] # List of (B,) arrays
+                weights = aux_data['weights']  # List of (B,) arrays
                 for level_idx, level_weights_batch in enumerate(weights):
-                    mean_weight = jnp.mean(level_weights_batch) # Mean across the batch
+                    mean_weight = jnp.mean(level_weights_batch)  # Mean across the batch
                     # Use clear, consistent logging tags
                     writer.add_scalar(f"train_weight_levels/{level_idx}",
-                                      mean_weight, step)
+                                      mean_weight, global_step)
 
                 mean_unweighted_losses = aux_data[
                     'mean_unweighted_losses_per_level']  # (N_Levels,) array
                 for level_idx, mean_unweighted_loss in enumerate(mean_unweighted_losses):
-                     # Use clear, consistent logging tags
-                    writer.add_scalar(f"train_loss_levels/{level_idx}", mean_unweighted_loss, step)
+                    # Use clear, consistent logging tags
+                    writer.add_scalar(f"train_loss_levels/{level_idx}", mean_unweighted_loss,
+                                      global_step)
+            global_step += 1
 
     print("Training finished.")
     writer.close()
