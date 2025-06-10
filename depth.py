@@ -469,16 +469,12 @@ class MultiLevelPhotometricLoss(nnx.Module):
         # Calculate average UNWEIGHTED loss per level across the batch
         average_unweighted_losses_per_level = jnp.mean(stacked_mean_losses, axis=1)  # (N_Levels,)
 
-        baselines = jnp.concatenate([average_unweighted_losses_per_level[1:],
-                                    average_unweighted_losses_per_level[-1:]])
+        level_weights = jnp.array([1./(2**i) for i in range(len(pyramid1))])
+        norm_level_weights = level_weights / jnp.sum(level_weights)
 
-        relative_losses = average_unweighted_losses_per_level - baselines
-        weights = softmax(relative_losses)
-
-        final_scalar_loss = jnp.sum(average_unweighted_losses_per_level[0])
+        final_scalar_loss = jnp.sum(average_unweighted_losses_per_level * norm_level_weights)
 
         aux_data = {
-            'weights': weights,  # List of (B,) arrays, ordered finest to coarsest
             'mean_unweighted_losses_per_level': average_unweighted_losses_per_level
             # (N_Levels,) array
         }

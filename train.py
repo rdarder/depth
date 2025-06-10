@@ -118,14 +118,6 @@ def main():
             if global_step % 10 == 0:
                 writer.add_scalar("train_loss", loss_value, global_step)
                 print(f"Step {global_step}, Total Weighted Loss: {loss_value:.4f}")
-
-                weights = aux_data['weights']  # List of (B,) arrays
-                for level_idx, level_weights_batch in enumerate(weights):
-                    mean_weight = jnp.mean(level_weights_batch)  # Mean across the batch
-                    # Use clear, consistent logging tags
-                    writer.add_scalar(f"train_weight_levels/{level_idx}",
-                                      mean_weight, global_step)
-
                 mean_unweighted_losses = aux_data[
                     'mean_unweighted_losses_per_level']  # (N_Levels,) array
                 for level_idx, mean_unweighted_loss in enumerate(mean_unweighted_losses):
