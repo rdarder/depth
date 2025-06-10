@@ -21,14 +21,13 @@ TRAIN_DATASET_ROOT = Path('datasets/frames')
 MAX_FRAMES_LOOKAHEAD = 5
 
 LEARNING_RATE = 1e-4
-NUM_EPOCHS = 100
-BATCH_SIZE = 10
+NUM_EPOCHS = 3
+BATCH_SIZE = 50
 
 PATCH_SIZE = 2
 NCC_PATCH_SIZE = 4
 CHANNELS = 4
 LEVELS = 6
-WAVELET = 'db2'
 
 
 def loss_fn(model, f1, f2, priors):
@@ -77,7 +76,6 @@ def main():
         patch_size=PATCH_SIZE,
         channels=CHANNELS,
         levels=LEVELS,
-        wavelet=WAVELET,
         ncc_patch_size=NCC_PATCH_SIZE,
         rngs=rngs,
         loss_alpha=2.0,

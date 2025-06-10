@@ -19,6 +19,8 @@ class FrameMetadata:
 
 def load_frame_from_path(frame_path: str):
     img = cv2.imread(frame_path, cv2.IMREAD_GRAYSCALE)
+    if img is None:
+        raise Exception(f'frame not found at {frame_path}')
     as_array = jnp.asarray(img)
     assert as_array.ndim == 2
     normalized = as_array / 255.0

@@ -137,41 +137,24 @@ class PatchFlowPredictor(nnx.Module):
 
 class ImageDecomposition(nnx.Module):
 
-    def __init__(self, levels: int, rngs: nnx.Rngs, wavelet: str = 'db2'):
+    def __init__(self, levels: int, rngs: nnx.Rngs):
         self._levels = levels
         self._rngs = rngs
-        self._wavelet = wavelet
-        py_wavelet = pywt.Wavelet(wavelet)
-        kernels = self._make_kernels(
-            jnp.array(py_wavelet.dec_lo), jnp.array(py_wavelet.dec_hi)
-        )
-        self._kernels = nnx.Variable(kernels, collection='constants')
+        self._decomposition = nnx.Conv(in_features=1, out_features=4,kernel_size=(4,4),rngs=rngs,
+                                       padding='VALID', strides=(2,2))
 
     def __call__(self, img: jnp.ndarray) -> list[jax.Array]:
         current = img
         pyramid = []
         for _ in range(self._levels):
             padded = jnp.pad(current, ((0, 0), (0, 0), (1, 1), (1, 1)), mode='edge')
-            decomposed = jax.lax.conv_general_dilated(
-                padded,
-                self._kernels.value,
-                window_strides=(2, 2),
-                padding='valid',
-                dimension_numbers=('NCHW', 'OIHW', 'NCHW')
-            )
-            current = decomposed[:, :1]
-            pyramid.append(decomposed)
+            transposed_for_conv = padded.transpose(0,2,3,1)
+            decomposed = self._decomposition(transposed_for_conv)
+            decomposed_transposed_back = decomposed.transpose(0,3,1,2)
+            current = decomposed_transposed_back[:, :1]
+            pyramid.append(decomposed_transposed_back)
 
         return pyramid
-
-    def _make_kernels(self, lo, hi):
-        ll = jnp.outer(lo, lo)
-        lh = jnp.outer(hi, lo)
-        hl = jnp.outer(lo, hi)
-        hh = jnp.outer(hi, hi)
-        filters = jnp.stack([ll, lh, hl, hh], 0)
-        filters = jnp.expand_dims(filters, 1)
-        return filters
 
 
 class PatchExtractor:
@@ -239,7 +222,8 @@ class PatchExtractor:
             indexing='ij'
         )
         grid_yx = jnp.stack([grid_y, grid_x], axis=0)
-        patch_flow = flow * P
+        patch_flow = flow * P # this may not be accurate. it's just twice the decomposition patch
+        # size, which at the time holds (2*DP = NCC_P)
         flow_coords = patch_flow.repeat(P, axis=1).repeat(P, axis=2)
         map_coords = grid_yx + flow_coords
         warped_patches = map_coordinates(frame, map_coords, order=1)
@@ -504,14 +488,14 @@ class MultiLevelPhotometricLoss(nnx.Module):
 
 class ImagePairFlowPredictor(nnx.Module):
     def __init__(self, patch_size: int, channels: int,
-                 levels: int, wavelet: str, ncc_patch_size: int, rngs: nnx.Rngs,
+                 levels: int, ncc_patch_size: int, rngs: nnx.Rngs,
                  loss_alpha: float = 10.0, loss_beta: float = 1.0, loss_gamma: float = 1.0):
         self._layers_predictor = MultiLayerFlowPredictor(
             patch_size=patch_size,
             channels=channels,
             rngs=rngs
         )
-        self._image_decomposition = ImageDecomposition(levels=levels, rngs=rngs, wavelet=wavelet)
+        self._image_decomposition = ImageDecomposition(levels=levels, rngs=rngs)
         self._ncc_patch_size = ncc_patch_size
         self._loss = MultiLevelPhotometricLoss(ncc_patch_size=ncc_patch_size, rngs=rngs,
                                                alpha=loss_alpha, beta=loss_beta, gamma=loss_gamma)
@@ -599,7 +583,6 @@ def run():
     dummy_priors = jax.random.normal(rngs.prior(), (B, 2, PH, PW)) * 0.01
 
     model = ImagePairFlowPredictor(patch_size=patch_size_in_run, channels=4, levels=levels_in_run,
-                                   wavelet='db2',
                                    ncc_patch_size=4, rngs=rngs)
     # Pass the dummy prior
     return model(f1_batched, f2_batched, priors=dummy_priors, train=False)
