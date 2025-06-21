@@ -13,6 +13,18 @@ keywords = ["example", "project"]
 
 dependencies = ["jax (>=0.6.0,<0.7.0)", "flax (>=0.10.6,<0.11.0)", "pillow (>=11.2.1,<12.0.0)", "pywavelets (>=1.8.0,<2.0.0)", "jaxwt (>=0.1.1,<0.2.0)", "matplotlib (>=3.10.3,<4.0.0)", "optax (>=0.2.4,<0.3.0)", "tensorflow (>=2.19.0,<3.0.0)"]
 
+[tool.pytest.ini_options]
+testpaths = [
+    "src"
+]
+python_files = "*.py"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"depth.test_fixtures" = ["test_fixtures/*"]
+
 [project.optional-dependencies]
 dev = []
 
