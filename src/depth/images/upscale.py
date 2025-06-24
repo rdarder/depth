@@ -17,7 +17,7 @@ def upscale_values_2n_plus2(flow: jax.Array) -> jax.Array:
 
 
 def upscale_size_2n_plus_2(flow: jax.Array) -> jax.Array:
-    """Upscales images of shape (B, C, H, W) to (B, C, 2*H+2, 2W+2) and smooths it afterwards."""
+    """Upscales images of shape (B, H, W, C) to (B, 2*H+2, 2W+2, C) and smooths it afterwards."""
     extended_upscaled_flow = flow.repeat(2, axis=1).repeat(2, axis=2)
     extended_padded_upscaled_flow = jnp.pad(
         extended_upscaled_flow, ((0, 0), (2, 2), (2, 2), (0, 0)), mode='edge'
