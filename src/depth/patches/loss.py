@@ -1,8 +1,6 @@
 import jax
 import jax.numpy as jnp
-from keras.src.backend.jax.numpy import squeeze
 
-from depth.images.separable_convolution import separable_convolution
 from depth.patches.difference import sum_of_absolute_differences
 from depth.patches.shift import shifted_center_patch
 

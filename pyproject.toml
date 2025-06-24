@@ -7,11 +7,11 @@ name = "depth"
 version = "0.1.0"
 description = "Single camera multi-pose depth estimation"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.12,<4.0"
 license = { file = "LICENSE" }
 keywords = ["example", "project"]
 
-dependencies = ["jax (>=0.6.0,<0.7.0)", "flax (>=0.10.6,<0.11.0)", "pillow (>=11.2.1,<12.0.0)", "pywavelets (>=1.8.0,<2.0.0)", "jaxwt (>=0.1.1,<0.2.0)", "matplotlib (>=3.10.3,<4.0.0)", "optax (>=0.2.4,<0.3.0)", "tensorflow (>=2.19.0,<3.0.0)"]
+dependencies = ["jax (>=0.6.0,<0.7.0)", "flax (>=0.10.6,<0.11.0)", "pillow (>=11.2.1,<12.0.0)", "jaxwt (>=0.1.1,<0.2.0)", "matplotlib (>=3.10.3,<4.0.0)", "optax (>=0.2.4,<0.3.0)", "tensorflow (>=2.19.0,<3.0.0)", "tensorboardx (>=2.6.4,<3.0.0)", "tyro (>=0.9.24,<0.10.0)"]
 
 [tool.pytest.ini_options]
 testpaths = [
@@ -19,7 +19,7 @@ testpaths = [
 ]
 python_files = "*.py"
 [project.scripts]
-"train" = "depth.model.train:train_loop"
+"train" = "depth.model.train:run"
 
 [tool.setuptools.packages.find]
 where = ["src"]
