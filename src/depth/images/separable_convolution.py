@@ -40,6 +40,13 @@ def conv_output_size(input_size: int, kernel_size: int, stride: int):
     return output
 
 
+def conv_output_size_steps(input_size: int, kernel_size: int, stride: int, steps: int):
+    output = input_size
+    for i in range(steps):
+        output = conv_output_size(output, kernel_size, stride)
+    return output
+
+
 def test_separable_smoothing_filter():
     img = jnp.arange(9).reshape(1, 3, 3, 1).astype(jnp.float32)
     kernel = jnp.array([0.5, 0.5]).reshape(1, 1, 2)

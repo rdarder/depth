@@ -19,7 +19,8 @@ class PatchFlowEstimator(nnx.Module):
         rngs: An nnx.Rngs object for parameter initialization.
     """
 
-    def __init__(self, patch_size: int, num_channels: int, features_dim: int, *, rngs: Rngs):
+    def __init__(self, patch_size: int, num_channels: int, features_dim: int, train: bool,
+                 *, rngs: Rngs):
         assert patch_size >= 3
         self.num_channels = num_channels
         self.features_dim = features_dim
@@ -32,6 +33,12 @@ class PatchFlowEstimator(nnx.Module):
             padding='VALID',
             rngs=rngs,
         )
+        self.bn1 = nnx.BatchNorm(
+            num_features=features_dim,
+            use_running_average=not train,
+            rngs=rngs
+        )
+
         feat_conv_output = conv_output_size(self.patch_size, self.patch_size - 1, 1)
 
         self.cost_volume_conv = nnx.Conv(
@@ -41,6 +48,13 @@ class PatchFlowEstimator(nnx.Module):
             padding='VALID',
             rngs=rngs,
         )
+
+        self.bn2 = nnx.BatchNorm(
+            num_features=features_dim,
+            use_running_average=not train,
+            rngs=rngs
+        )
+
         vol_conv_output = conv_output_size(feat_conv_output, self.patch_size - 2, 1)
         mlp_input_size = vol_conv_output * vol_conv_output * features_dim + 2
         self.mlp_hidden = nnx.Linear(
@@ -78,6 +92,8 @@ class PatchFlowEstimator(nnx.Module):
         )  # (2*B, P, P, C)
 
         features = self.feat_conv(combined_patches)
+        # Apply BatchNorm after conv and before activation
+        features = self.bn1(features)
         features = nnx.relu(
             features
         )  # Output: (2*B, P1, P1, features_dim)
@@ -94,6 +110,7 @@ class PatchFlowEstimator(nnx.Module):
         )  # Shape: (B, P1, P1, 2*features_dim)
 
         cost_volume_processed = self.cost_volume_conv(combined_feat_diff_prod)
+        cost_volume_processed = self.bn2(cost_volume_processed)
         cost_volume_processed = nnx.relu(
             cost_volume_processed
         )  # Output: B, P2, P2, features_dim)
@@ -116,12 +133,15 @@ class PatchFlowEstimator(nnx.Module):
 
 def test_patch_flow_estimator():
     rngs = nnx.Rngs(0)
-    estimator = PatchFlowEstimator(patch_size=4, num_channels=2, features_dim=8, rngs=rngs)
+    estimator = PatchFlowEstimator(
+        patch_size=4, num_channels=2, features_dim=8, train=False, rngs=rngs
+    )
     canvas = jax.random.uniform(jax.random.key(0), (2, 7, 9, 2))  # B,H,W,C
     frame1 = canvas[:, 1:, 1:, :]
     frame2 = canvas[:, :-1, :-1, :]
     patches1 = extract_patches_nhwc(frame1, patch_size=4, stride=2)
     patches2 = extract_patches_nhwc(frame2, patch_size=4, stride=2)
     priors = jnp.zeros((2, 2, 3, 2))
+    # Pass use_running_average to the __call__ method
     flow_delta = estimator(patches1, patches2, priors)
     assert flow_delta.shape == priors.shape

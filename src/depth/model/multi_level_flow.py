@@ -50,13 +50,14 @@ def test_multi_level_flow_estimator():
     batch2 = jnp.stack([frame2, frame1], axis=0)
     rngs = nnx.Rngs(0)
     image_downscaler = ImageDownscaler(alpha=0.5, stride=2)
-    pyramid_decomposer = ImagePyramidDecomposer(image_downscaler)
-    patch_flow_estimator = PatchFlowEstimator(patch_size=4, num_channels=1, features_dim=8,
-                                              rngs=rngs)
+    pyramid_decomposer = ImagePyramidDecomposer(image_downscaler, levels=4)
+    patch_flow_estimator = PatchFlowEstimator(
+        patch_size=4, num_channels=1, features_dim=8, train=False, rngs=rngs
+    )
     level_flow_estimator = LevelFlowEstimator(stride=2, flow_estimator=patch_flow_estimator)
     pyramid_flow_estimator = PyramidFlowEstimator(level_flow_estimator)
-    pyramid1 = pyramid_decomposer(batch1, levels=4)
-    pyramid2 = pyramid_decomposer(batch2, levels=4)
+    pyramid1 = pyramid_decomposer(batch1)
+    pyramid2 = pyramid_decomposer(batch2)
     prior = jnp.zeros((2, 3, 3, 2), jnp.float32)
     flow_with_loss_pyramid = pyramid_flow_estimator(pyramid1, pyramid2, prior)
     jax.block_until_ready(flow_with_loss_pyramid)

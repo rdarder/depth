@@ -1,14 +1,14 @@
+from dataclasses import dataclass
 from functools import lru_cache
-from itertools import chain, batched
+from itertools import batched
 from pathlib import Path
 from random import Random
-
 from typing import Iterable, Iterator
 
-import cv2
-from dataclasses import dataclass
-import jax.numpy as jnp
 import jax
+import jax.numpy as jnp
+
+from depth.images.load import load_frame_from_path
 
 
 @dataclass(frozen=True)
@@ -17,30 +17,20 @@ class FrameMetadata:
     filename: str
 
 
-def load_frame_from_path(frame_path: str):
-    img = cv2.imread(frame_path, cv2.IMREAD_GRAYSCALE)
-    if img is None:
-        raise Exception(f'frame not found at {frame_path}')
-    as_array = jnp.asarray(img)
-    assert as_array.ndim == 2
-    normalized = as_array / 255.0
-    with_channel_dimension = normalized[None, :, :]
-    return with_channel_dimension
-
-
 class FrameSource:
-    def __init__(self, folders: Iterable[Path], cache_size: int = 0):
+    def __init__(self, folders: Iterable[Path], img_size: int, cache_size: int = 0):
         self.frames = self.discover_video_frames(sorted(folders))
         if cache_size > 0:
             self.loader = lru_cache(maxsize=cache_size)(load_frame_from_path)
         else:
             self.loader = load_frame_from_path
+        self.img_size = img_size
 
     def discover_video_frames(self, folders: Iterable[Path]):
         global_index = 0
         all_frame_metadata = []
         for folder in folders:
-            frame_paths = sorted(folder.glob("*.png"))
+            frame_paths = sorted(folder.glob("*.jpg"))
             for local_idx, path in enumerate(frame_paths, start=1):
                 frame = FrameMetadata(video=str(path.parent), filename=path.name)
                 all_frame_metadata.append(frame)
@@ -63,7 +53,7 @@ class FrameSource:
     def load_single_frame(self, frame_idx: int) -> jax.Array:
         frame_metadata = self.frames[frame_idx]
         frame_path = f"{frame_metadata.video}/{frame_metadata.filename}"
-        return self.loader(frame_path)
+        return self.loader(frame_path, self.img_size)
 
     def load_frame_pair(self, pair: tuple[int, int]):
         return self.load_single_frame(pair[0]), self.load_single_frame(pair[1])
@@ -98,8 +88,9 @@ class FramePairsDataset:
             batch_array = jnp.array(loaded_pairs).transpose(1, 0, 2, 3, 4)
             yield batch_array
 
+
 def sample_run():
-    source = FrameSource(Path('datasets/frames').glob('*'), cache_size=10_000)
+    source = FrameSource(Path('datasets/frames').glob('*'), 158, cache_size=10_000)
     dataset = FramePairsDataset(
         source,
         batch_size=100,
@@ -116,6 +107,7 @@ def sample_run():
                 print(f"frame batch shape: {f.shape}")
             if j % 100 == 0:
                 print(f"batch {j}")
+
 
 if __name__ == '__main__':
     sample_run()

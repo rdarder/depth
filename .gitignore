@@ -10,3 +10,5 @@ tensorboard_logs/
 .zed/
 saved_models/
 .idea/
+runs/
+src/depth.egg-info

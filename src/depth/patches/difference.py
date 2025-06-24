@@ -59,8 +59,3 @@ def test_sad_altered_patch():
     patch1 = jax.random.normal(jax.random.key(1), (3, 3, 1))
     patch2 = patch1.at[0, :, 0].set(1.0)
     assert sum_of_absolute_differences(patch1, patch2) > 0.3
-
-
-sample_patch = jax.random.normal(jax.random.key(1), (3, 3, 2))
-jax.debug.print("{x}", x=sum_of_absolute_differences(sample_patch, sample_patch))
-assert jnp.all(sum_of_absolute_differences(sample_patch, sample_patch) == jnp.zeros((2,)))
