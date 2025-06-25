@@ -1,7 +1,7 @@
 import jax
 import jax.numpy as jnp
 
-from depth.patches.difference import sum_of_absolute_differences
+from depth.patches.difference import sum_of_absolute_differences, normalized_cross_correlation
 from depth.patches.shift import shifted_center_patch
 
 
@@ -23,14 +23,15 @@ def patch_flow_loss(patch1: jax.Array, patch2: jax.Array, flow: jax.Array) -> ja
     assert patch1.shape == patch2.shape
     patch1_center = shifted_center_patch(patch1, -flow / 2)
     patch2_shifted = shifted_center_patch(patch2, flow / 2)
-    return jnp.mean(sum_of_absolute_differences(patch1_center, patch2_shifted))
+    return jnp.mean(normalized_cross_correlation(patch1_center, patch2_shifted))
 
 
 def test_patch_flow_loss_exact_match():
     canvas = jax.random.normal(jax.random.key(1), (5, 5, 1))
     patch1 = canvas[:4, :4, :]
     patch2 = canvas[1:, 1:, :]
-    assert patch_flow_loss(patch1, patch2, jnp.array([-1., -1.])) == 0
+    flow_loss = patch_flow_loss(patch1, patch2, jnp.array([-1., -1.]))
+    assert jnp.allclose(flow_loss, 0, atol=1e-6)
 
 
 def test_patch_flow_loss_close_match():
@@ -51,4 +52,5 @@ def test_patch_flow_loss_exact_match_two_channels():
     canvas = jax.random.normal(jax.random.key(1), (5, 5, 2))
     patch1 = canvas[:4, :4, :]
     patch2 = canvas[1:, 1:, :]
-    assert patch_flow_loss(patch1, patch2, jnp.array([-1., -1.])) == 0
+    loss = patch_flow_loss(patch1, patch2, jnp.array([-1., -1.]))
+    assert jnp.allclose(loss, 0, atol=1e-6)

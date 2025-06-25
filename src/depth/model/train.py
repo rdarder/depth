@@ -1,6 +1,3 @@
-from dataclasses import dataclass
-from pathlib import Path
-
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -14,29 +11,12 @@ import orbax.checkpoint
 
 from depth.datasets.frames import FrameSource, FramePairsDataset
 from depth.inference.reflow import log_flow_grid
-from depth.model.build import make_model, ModelSettings, generate_zero_priors
+from depth.model.build import make_model, generate_zero_priors
 from depth.model.frame_pair_flow import FramePairFlow
 from depth.model.loss import frame_pair_loss
-
-
-@dataclass
-class TrainSettings:
-    learning_rate: float = 1e-4
-    num_epochs: int = 50
-    batch_size: int = 100
-    max_frames_lookahead: int = 10
-    tensorboard_logs: Path = Path('./runs')
-    checkpoint_dir: Path = Path('./checkpoints')
-    train_dataset_root: Path = Path('./datasets/frames')
-
+from depth.model.settings import Settings
 
 frame_pair_loss_with_grad = nnx.value_and_grad(frame_pair_loss, has_aux=True)
-
-
-@dataclass
-class Settings:
-    model: ModelSettings
-    train: TrainSettings
 
 
 @nnx.jit
@@ -91,26 +71,25 @@ def train_loop(settings: Settings):
                 break
             if global_step % 100 == 0:
                 writer.add_scalar("train_loss", loss_value, global_step)
-                print(f"Step {global_step}, Total Weighted Loss: {loss_value:.4f}")
-                level_losses = [jnp.mean(flow_with_loss[:, :, :, 2])
-                                for flow_with_loss in aux['flow_with_loss']]
-                for level_idx, mean_unweighted_loss in enumerate(level_losses):
-                    # Use clear, consistent logging tags
-                    writer.add_scalar(f"train_loss_levels/{level_idx}",
-                                      np.array(mean_unweighted_loss), global_step)
-
+                level_losses_dict = {str(i): l for i, l in enumerate(aux['levels_losses'])}
+                writer.add_scalars("Levels-losses", level_losses_dict, global_step)
+                print(
+                    f"Step {global_step:06}\n"
+                    f"    Total Weighted Loss: {loss_value:.4f}\n"
+                    f"    Levels losses: {aux['levels_losses']}\n"
+                    f"    Levels weights: {aux['levels_weights']}\n"
+                )
                 log_flow_grid(aux['pyramid1'], aux['pyramid2'], aux['flow_with_loss'], writer,
                               global_step)
-
             global_step += 1
 
     print("Training finished.")
     writer.close()
-
     model_state = nnx.state(model)
     orbax_checkpointer.save(checkpoint_dir.absolute() / 'final', model_state)
     orbax_checkpointer.wait_until_finished()
     print("Checkpoint saving complete.")
+
 
 def run():
     import tyro

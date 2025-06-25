@@ -1,5 +1,3 @@
-from dataclasses import dataclass
-
 from flax import nnx as nnx
 from jax import numpy as jnp
 
@@ -8,17 +6,8 @@ from depth.model.frame_pair_flow import FramePairFlow
 from depth.model.multi_level_flow import PyramidFlowEstimator
 from depth.model.patch_flow import PatchFlowEstimator
 from depth.model.pyramid import ImageDownscaler, ImagePyramidDecomposer
+from depth.model.settings import ModelSettings
 from depth.model.single_level_flow import LevelFlowEstimator
-
-
-@dataclass
-class ModelSettings:
-    img_size: int = 158
-    levels: int = 4
-    decompose_kernel_size: int = 4
-    decompose_stride: int = 2
-    patch_size: int = 4
-    patch_stride: int = 2
 
 
 def make_model(seed: int, train: bool, settings: ModelSettings) \
@@ -28,7 +17,12 @@ def make_model(seed: int, train: bool, settings: ModelSettings) \
     image_downscaler = ImageDownscaler(alpha=0.5, stride=settings.decompose_stride)
     pyramid_decomposer = ImagePyramidDecomposer(image_downscaler, levels=settings.levels)
     patch_flow_estimator = PatchFlowEstimator(
-        patch_size=settings.patch_size, num_channels=1, features_dim=8, train=train, rngs=rngs
+        patch_size=settings.patch_size,
+        num_channels=1,
+        features=settings.predictor_features,
+        mlp_hidden_size=settings.mlp_hidden_size,
+        train=train,
+        rngs=rngs
     )
     level_flow_estimator = LevelFlowEstimator(stride=settings.patch_stride,
                                               flow_estimator=patch_flow_estimator)

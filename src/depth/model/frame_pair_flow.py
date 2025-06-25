@@ -44,7 +44,7 @@ def test_frame_pair_flow():
     image_downscaler = ImageDownscaler(alpha=0.5, stride=2)
     pyramid_decomposer = ImagePyramidDecomposer(image_downscaler, levels=4)
     patch_flow_estimator = PatchFlowEstimator(
-        patch_size=4, num_channels=1, features_dim=8, train=False, rngs=rngs
+        patch_size=4, num_channels=1, train=False, rngs=rngs
     )
     level_flow_estimator = LevelFlowEstimator(stride=2, flow_estimator=patch_flow_estimator)
     pyramid_flow_estimator = PyramidFlowEstimator(level_flow_estimator)

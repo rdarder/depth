@@ -50,7 +50,7 @@ def test_single_level_flow_estimator():
     rngs = nnx.Rngs(0)
     img = jax.random.uniform(jax.random.key(1), (3, 6, 8, 2))
     patch_flow_estimator = PatchFlowEstimator(
-        patch_size=4, num_channels=2, features_dim=8, train=False, rngs=rngs
+        patch_size=4, num_channels=2, train=False, rngs=rngs
     )
     level_flow_estimator = LevelFlowEstimator(stride=2, flow_estimator=patch_flow_estimator)
 
