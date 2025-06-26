@@ -6,7 +6,7 @@ from flax import nnx
 from jax import numpy as jnp
 
 from depth.images.load import load_frame_from_path
-from depth.images.separable_convolution import separable_convolution, conv_output_size
+from depth.images.separable_convolution import depthwise_separable_convolution, conv_output_size
 
 
 class ImageDownscaler:
@@ -17,7 +17,7 @@ class ImageDownscaler:
     def __call__(self, imgs: jax.Array):
         kernel = jnp.array([self.alpha, 1, 1, self.alpha]).reshape(1, 1, 4)
         kernel = kernel / jnp.sum(kernel)
-        return separable_convolution(imgs, kernel, self.stride)
+        return depthwise_separable_convolution(imgs, kernel, self.stride)
 
 
 class ImagePyramidDecomposer:

@@ -1,7 +1,7 @@
 import jax
 import jax.numpy as jnp
 
-from depth.images.separable_convolution import separable_convolution
+from depth.images.separable_convolution import depthwise_separable_convolution
 
 @jax.jit
 def shifted_center_patch(patch: jax.Array, flow: jax.Array) -> jax.Array:
