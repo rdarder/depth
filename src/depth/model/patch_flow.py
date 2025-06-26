@@ -61,6 +61,7 @@ class PatchFlowEstimator(nnx.Module):
         x = nnx.relu(x)
         output = self.linear2(x)
         output = output.reshape(*batch_dimensions, 2)
+        output = jax.nn.tanh(output)
         return output
 
 
