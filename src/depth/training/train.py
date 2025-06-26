@@ -1,20 +1,19 @@
+import os
+from datetime import datetime
+
+import flax.nnx as nnx
 import jax
 import jax.numpy as jnp
-import numpy as np
 import optax
-import flax.nnx as nnx
-
-from datetime import datetime
-from tensorboardX import SummaryWriter
-import os
 import orbax.checkpoint
+from tensorboardX import SummaryWriter
 
 from depth.datasets.frames import FrameSource, FramePairsDataset
-from depth.inference.reflow import log_flow_grid
 from depth.model.build import make_model, generate_zero_priors
 from depth.model.frame_pair_flow import FramePairFlow
 from depth.model.loss import frame_pair_loss
 from depth.model.settings import Settings
+from depth.training.logging import log_train_progress
 
 frame_pair_loss_with_grad = nnx.value_and_grad(frame_pair_loss, has_aux=True)
 
@@ -53,7 +52,7 @@ def train_loop(settings: Settings):
         max_frame_lookahead=settings.train.max_frames_lookahead,
         include_reversed_pairs=True,
         drop_uneven_batches=True,
-        seed=0
+        seed=1
     )
     priors = generate_zero_priors(settings.train.batch_size, settings.model)
 
@@ -70,17 +69,7 @@ def train_loop(settings: Settings):
                 print(f"Warning: NaN or Inf loss detected at step {step}. Exiting training.")
                 break
             if global_step % 100 == 0:
-                writer.add_scalar("train_loss", loss_value, global_step)
-                level_losses_dict = {str(i): l for i, l in enumerate(aux['levels_losses'])}
-                writer.add_scalars("Levels-losses", level_losses_dict, global_step)
-                print(
-                    f"Step {global_step:06}\n"
-                    f"    Total Weighted Loss: {loss_value:.4f}\n"
-                    f"    Levels losses: {aux['levels_losses']}\n"
-                    f"    Levels weights: {aux['levels_weights']}\n"
-                )
-                log_flow_grid(aux['pyramid1'], aux['pyramid2'], aux['flow_with_loss'], writer,
-                              global_step)
+                log_train_progress(aux, global_step, loss_value, writer)
             global_step += 1
 
     print("Training finished.")

@@ -19,7 +19,7 @@ testpaths = [
 ]
 python_files = "*.py"
 [project.scripts]
-"train" = "depth.model.train:run"
+"train" = "depth.training.train:run"
 
 [tool.setuptools.packages.find]
 where = ["src"]
