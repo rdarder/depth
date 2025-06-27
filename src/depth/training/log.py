@@ -38,6 +38,8 @@ def build_image_grid(pyramid1: Sequence[jax.Array],
     rows = len(pyramid1)
     fig, axs = plt.subplots(rows, 6, figsize=(12, 2 * rows))
     column_titles = ['Frame1', 'Reflowed-F2->F1', 'Frame2', 'loss', 'flow-y', 'flow-x']
+    if rows == 1:
+        axs = [axs] #pyplot doesn't return a list when the there's a single row/col.
     for i, ax in enumerate(axs[0]):
         ax.set_title(column_titles[i], fontsize=14, pad=10)  # Set title for top subplot in column
 

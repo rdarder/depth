@@ -12,13 +12,11 @@ def frame_pair_loss(model: PyramidFlowEstimator,
                     priors: jax.Array) -> tuple[jax.Array, dict[str, Any]]:
     flow_pyramid_with_loss = model(pyramid1, pyramid2, priors)
     level_losses = jnp.array([jnp.mean(level[:, :, :, 2]) for level in flow_pyramid_with_loss])
-    weights = jnp.array([1., 0.5])
-    weights = weights / jnp.sum(weights)
-    weighted_loss = jnp.sum(level_losses[:2] * weights)
+    weighted_loss = level_losses[0]
     aux = dict(pyramid1=pyramid1,
                pyramid2=pyramid2,
                flow_with_loss=flow_pyramid_with_loss,
-               levels_weights=weights,
+               levels_weights=jnp.array([1.0]),
                levels_losses=level_losses)
 
     return weighted_loss, aux

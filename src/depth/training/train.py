@@ -39,7 +39,7 @@ def single_level_train_loop(model: PyramidFlowEstimator,
                             global_step: int,
                             epochs: int
                             ) -> nnx.Module:
-    keep_levels = stage + 2
+    keep_levels = stage + 1
     train_dataset = make_frame_pyramids_dataset(settings, levels=keep_levels)
     priors = generate_zero_priors(settings.train.batch_size, settings.model)
     print(f"Starting stage {stage} training loop, using {keep_levels} pyramid levels.")
