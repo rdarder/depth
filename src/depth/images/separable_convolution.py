@@ -26,7 +26,7 @@ def conv_output_size(input_size: int, kernel_size: int, stride: int):
 
 def conv_output_size_steps(input_size: int, kernel_size: int, stride: int, steps: int):
     output = input_size
-    for i in range(steps):
+    for i in range(steps - 1):
         output = conv_output_size(output, kernel_size, stride)
     return output
 

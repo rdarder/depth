@@ -6,10 +6,10 @@ import jax.numpy as jnp
 from flax import nnx
 
 from depth.images.load import load_frame_from_path
+from depth.images.pyramid import build_image_pyramid
 from depth.images.separable_convolution import conv_output_size
 from depth.images.upscale import upscale_size_2n_plus_2, upscale_values_2n_plus2
 from depth.model.patch_flow import PatchFlowEstimator
-from depth.model.pyramid import ImageDownscaler, ImagePyramidDecomposer
 from depth.model.single_level_flow import LevelFlowEstimator
 
 
@@ -49,15 +49,13 @@ def test_multi_level_flow_estimator():
     batch1 = jnp.stack([frame1, frame2], axis=0)
     batch2 = jnp.stack([frame2, frame1], axis=0)
     rngs = nnx.Rngs(0)
-    image_downscaler = ImageDownscaler(alpha=0.5, stride=2)
-    pyramid_decomposer = ImagePyramidDecomposer(image_downscaler, levels=4)
     patch_flow_estimator = PatchFlowEstimator(
         patch_size=4, num_channels=1, train=False, rngs=rngs
     )
     level_flow_estimator = LevelFlowEstimator(stride=2, flow_estimator=patch_flow_estimator)
     pyramid_flow_estimator = PyramidFlowEstimator(level_flow_estimator)
-    pyramid1 = pyramid_decomposer(batch1)
-    pyramid2 = pyramid_decomposer(batch2)
+    pyramid1 = build_image_pyramid(batch1, levels=5, keep=5)
+    pyramid2 = build_image_pyramid(batch2, levels=5, keep=5)
     prior = jnp.zeros((2, 3, 3, 2), jnp.float32)
     flow_with_loss_pyramid = pyramid_flow_estimator(pyramid1, pyramid2, prior)
     jax.block_until_ready(flow_with_loss_pyramid)

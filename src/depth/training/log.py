@@ -11,7 +11,8 @@ from tensorboardX import SummaryWriter
 
 from depth.images.load import load_frame_from_path
 from depth.images.upscale import upscale_size_2n_plus_2
-from depth.model.build import make_model, generate_zero_priors
+from depth.model.build import make_model
+from depth.train.build import generate_zero_priors
 from depth.model.settings import ModelSettings
 
 

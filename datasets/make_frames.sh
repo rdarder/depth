@@ -16,7 +16,7 @@ fi
 
 # --- Configuration ---
 OUTPUT_ROOT="frames"
-TARGET_SIZE="158x158" # Target size after cropping and resizing
+TARGET_SIZE="190x190" # Target size after cropping and resizing
 
 # --- Script Logic ---
 
