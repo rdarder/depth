@@ -15,5 +15,6 @@ def make_frame_pyramids_dataset(settings: Settings, levels: int):
         drop_uneven_batches=True,
         seed=1
     )
-    pyramid_pairs = FramePyramidPairsDataset(frame_pairs, settings.model.levels, keep=levels)
+    pyramid_pairs = FramePyramidPairsDataset(frame_pairs, settings.model.levels, keep=levels,
+                                             cache_size=10_000)
     return pyramid_pairs
