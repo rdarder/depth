@@ -14,3 +14,4 @@ runs/
 src/depth.egg-info
 profiler_logs/
 repl.ipynb
+!src/depth/datasets
