@@ -7,7 +7,7 @@ class TrainSettings:
     learning_rate: float = 1e-4
     num_epochs: int = 50
     batch_size: int = 100
-    max_frames_lookahead: int = 8
+    max_frames_lookahead: int = 5
     tensorboard_logs: Path = Path('./runs')
     checkpoint_dir: Path = Path('./checkpoints')
     train_dataset_root: Path = Path('./datasets/frames')

@@ -37,6 +37,7 @@ def single_level_train_loop(model: PyramidFlowEstimator,
                             checkpointer: StandardCheckpointer,
                             stage: int,
                             global_step: int,
+                            epochs: int
                             ) -> nnx.Module:
     keep_levels = stage + 2
     train_dataset = make_frame_pyramids_dataset(settings, levels=keep_levels)
@@ -45,7 +46,7 @@ def single_level_train_loop(model: PyramidFlowEstimator,
     print(f"{len(train_dataset)} frame pairs on {settings.train.batch_size} size batches "
           f"over {settings.train.num_epochs} epochs")
 
-    for epoch in range(settings.train.num_epochs):
+    for epoch in range(epochs):
         print(f"Epoch {epoch}")
         for step, (f1_jax, f2_jax) in enumerate(train_dataset):
             loss_value, aux = train_step(model, optimizer, f1_jax, f2_jax, priors)
@@ -75,10 +76,12 @@ def train_loop(settings: Settings):
         optax.adam(learning_rate=settings.train.learning_rate)
     ))
     global_step = 0
+    epochs = settings.train.num_epochs
     for stage in range(settings.model.levels - 1):
         global_step = single_level_train_loop(
-            model, optimizer, settings, logger, checkpointer, stage, global_step
+            model, optimizer, settings, logger, checkpointer, stage, global_step, epochs
         )
+        epochs = 2 * epochs
         save_checkpoint(model, checkpointer, checkpoint_dir, f"{stage}-final")
     print("Training finished.")
     logger.close()

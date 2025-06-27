@@ -86,7 +86,8 @@ if __name__ == '__main__':
 
 
 def log_train_progress(aux, global_step, loss_value, writer):
-    for i, level_loss in enumerate(aux['levels_losses']):
+    coarse_to_fine_losses = reversed(aux['levels_losses'])
+    for i, level_loss in enumerate(coarse_to_fine_losses):
         writer.add_scalar(f"level_loss/{i}", level_loss, global_step)
     writer.add_scalar("train_loss", loss_value, global_step)
     log_flow_grid(aux['pyramid1'], aux['pyramid2'], aux['flow_with_loss'], writer,
