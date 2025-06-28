@@ -34,21 +34,25 @@ class PatchFlowEstimator(nnx.Module):
             rngs=rngs,
             use_bias=False,
         )
+        self.bn_mix_shifts = nnx.BatchNorm(num_features=30, use_running_average=not train,
+                                           rngs=rngs)
         self.mlp_hidden = nnx.Linear(
             in_features=32,
             out_features=16,
             use_bias=True,
             rngs=rngs,
         )
+        self.bn_hidden1 = nnx.BatchNorm(num_features=16, use_running_average=not train, rngs=rngs)
         self.mlp_hidden2 = nnx.Linear(
             in_features=16,
             out_features=16,
             use_bias=True,
             rngs=rngs,
         )
+        self.bn_hidden2 = nnx.BatchNorm(num_features=16, use_running_average=not train, rngs=rngs)
         self.mlp_output = nnx.Linear(
             in_features=16,
-            out_features=2, # TODO: add confidence prediction here.
+            out_features=2,  # TODO: add confidence prediction here.
             use_bias=True,
             rngs=rngs,
         )
@@ -60,15 +64,18 @@ class PatchFlowEstimator(nnx.Module):
         flat_priors = prior.reshape(B * PH * PW, 2)
         shifted_patches = self.shift_conv(patches)
         mixed_shifts = self.mix_shifts_conv(shifted_patches)
-        avg_abs_mixed_shifts = jnp.mean(jnp.abs(mixed_shifts), axis=(1, 2)).reshape(BP, -1)
+        bn_mixed_shifts = self.bn_mix_shifts(mixed_shifts)
+        avg_abs_mixed_shifts = jnp.mean(jnp.abs(bn_mixed_shifts), axis=(1, 2)).reshape(BP, -1)
         avg_shifts_and_priors = jnp.concatenate([avg_abs_mixed_shifts, flat_priors], axis=-1)
         hidden_state = self.mlp_hidden(avg_shifts_and_priors)
-        non_linear_hidden = jax.nn.relu(hidden_state)
+        bn_hidden_state = self.bn_hidden1(hidden_state)
+        non_linear_hidden = jax.nn.relu(bn_hidden_state)
         hidden_state2 = self.mlp_hidden2(non_linear_hidden)
-        non_linear_hidden2 = jax.nn.relu(hidden_state2)
+        bn_hidden_state2 = self.bn_hidden2(hidden_state2)
+        non_linear_hidden2 = jax.nn.relu(bn_hidden_state2)
         output = self.mlp_output(non_linear_hidden2)
         norm_output = jax.nn.tanh(output)
-        norm_output_grid = norm_output.reshape(B, PH, PW, 2) # add confidence here.
+        norm_output_grid = norm_output.reshape(B, PH, PW, 2)  # add confidence here.
         return norm_output_grid
 
 
