@@ -50,8 +50,8 @@ def build_image_grid(pyramid1: Sequence[jax.Array],
         ax[2].imshow(img2[0], cmap="grey", vmin=0, vmax=1)
         ax[3].imshow(flow[0, :, :, 2:3], cmap="grey", vmin=0, vmax=1)
         flow_max = max_expected_flow(rows - i - 1)
-        ax[4].imshow(flow[0, :, :, 1:2], cmap="viridis", vmin=-flow_max, vmax=flow_max)
-        ax[5].imshow(flow[0, :, :, 0:1], cmap="viridis", vmin=-flow_max, vmax=flow_max)
+        ax[4].imshow(flow[0, :, :, 1:2], cmap="coolwarm", vmin=-flow_max, vmax=flow_max)
+        ax[5].imshow(flow[0, :, :, 0:1], cmap="coolwarm", vmin=-flow_max, vmax=flow_max)
         for axc in ax:
             axc.set_axis_off()
     plt.tight_layout()

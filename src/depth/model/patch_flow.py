@@ -13,56 +13,63 @@ class PatchFlowEstimator(nnx.Module):
     def __init__(self, patch_size: int, num_channels: int, features: int = 32,
                  mlp_hidden_size: int = 16, *, train: bool, rngs: Rngs):
         assert patch_size > 3
-
         self.patch_size = patch_size
-        total_input_channels = 2 * num_channels + 2
-        self.conv1_1x1 = nnx.Conv(in_features=total_input_channels, out_features=features,
-                                  kernel_size=(1, 1), strides=(1, 1), rngs=rngs)
-        self.bn1 = nnx.BatchNorm(features, use_running_average=not train, rngs=rngs)
-        self.conv2_spatial = nnx.Conv(in_features=features, out_features=features,
-                                      kernel_size=(2, 2), padding='VALID', rngs=rngs)
-        self.bn2 = nnx.BatchNorm(features, use_running_average=not train, rngs=rngs)
-        self.conv3_spatial = nnx.Conv(in_features=features, out_features=features,
-                                      kernel_size=(2, 2), strides=(1, 1), padding='VALID',
-                                      rngs=rngs)
-        self.bn3 = nnx.BatchNorm(features, use_running_average=not train, rngs=rngs)
-        final_spatial_dim = conv_output_size(
-            conv_output_size(patch_size, 2, 1), 2, 1
+
+        self.shift_conv = nnx.Conv(
+            in_features=2 * num_channels,
+            out_features=8 * num_channels,
+            kernel_size=(2, 2),
+            strides=(1, 1),
+            padding='VALID',
+            feature_group_count=2 * num_channels,
+            rngs=rngs,
+            use_bias=False,
         )
-        input_to_mlp_size = final_spatial_dim * final_spatial_dim * features  # 2 * 2 * features
-        self.linear1 = nnx.Linear(in_features=input_to_mlp_size, out_features=mlp_hidden_size,
-                                  rngs=rngs)
-        self.linear2 = nnx.Linear(in_features=mlp_hidden_size, out_features=2, rngs=rngs)
+        self.mix_shifts_conv = nnx.Conv(
+            in_features=8 * num_channels,
+            out_features=30,
+            kernel_size=(1, 1),
+            strides=(1, 1),
+            padding='VALID',
+            rngs=rngs,
+            use_bias=False,
+        )
+        self.mlp_hidden = nnx.Linear(
+            in_features=32,
+            out_features=16,
+            use_bias=True,
+            rngs=rngs,
+        )
+        self.mlp_hidden2 = nnx.Linear(
+            in_features=16,
+            out_features=16,
+            use_bias=True,
+            rngs=rngs,
+        )
+        self.mlp_output = nnx.Linear(
+            in_features=16,
+            out_features=2, # TODO: add confidence prediction here.
+            use_bias=True,
+            rngs=rngs,
+        )
 
     def __call__(self, patch1: jnp.ndarray, patch2: jnp.ndarray, prior: jnp.ndarray):
-        assert patch1.shape == patch2.shape
-        pshape = patch1.shape
-        non_batch_dimensions = pshape[-3:]
-        batch_dimensions = pshape[:-3]
-        patch1 = patch1.reshape(-1, *non_batch_dimensions)
-        patch2 = patch2.reshape(-1, *non_batch_dimensions)
-        x = jnp.concatenate([patch1, patch2], axis=-1)
-        prior_reshaped = prior.reshape(-1, 1, 1, 2)
-        prior_tiled = jnp.tile(prior_reshaped, (1, x.shape[1], x.shape[2], 1))
-        x = jnp.concatenate([x, prior_tiled], axis=-1)
-        x = self.conv1_1x1(x)
-        x = self.bn1(x)
-        x = nnx.relu(x)
-        x = self.conv2_spatial(x)
-        x = self.bn2(x)
-        x = nnx.relu(x)
-        x = self.conv3_spatial(x)
-        x = self.bn3(x)
-        x = nnx.relu(x)
-        batch_size = x.shape[0]
-        flattened_size = x.shape[1] * x.shape[2] * x.shape[3]
-        x = x.reshape(batch_size, flattened_size)
-        x = self.linear1(x)
-        x = nnx.relu(x)
-        output = self.linear2(x)
-        output = output.reshape(*batch_dimensions, 2)
-        output = jax.nn.tanh(output)
-        return output
+        B, PH, PW, H, W, C = patch1.shape
+        BP = B * PH * PW
+        patches = jnp.stack([patch1, patch2], axis=-1).reshape(BP, H, W, C * 2)
+        flat_priors = prior.reshape(B * PH * PW, 2)
+        shifted_patches = self.shift_conv(patches)
+        mixed_shifts = self.mix_shifts_conv(shifted_patches)
+        avg_abs_mixed_shifts = jnp.mean(jnp.abs(mixed_shifts), axis=(1, 2)).reshape(BP, -1)
+        avg_shifts_and_priors = jnp.concatenate([avg_abs_mixed_shifts, flat_priors], axis=-1)
+        hidden_state = self.mlp_hidden(avg_shifts_and_priors)
+        non_linear_hidden = jax.nn.relu(hidden_state)
+        hidden_state2 = self.mlp_hidden2(non_linear_hidden)
+        non_linear_hidden2 = jax.nn.relu(hidden_state2)
+        output = self.mlp_output(non_linear_hidden2)
+        norm_output = jax.nn.tanh(output)
+        norm_output_grid = norm_output.reshape(B, PH, PW, 2) # add confidence here.
+        return norm_output_grid
 
 
 def test_patch_flow_estimator():
