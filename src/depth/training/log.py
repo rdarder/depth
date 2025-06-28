@@ -12,6 +12,7 @@ from tensorboardX import SummaryWriter
 from depth.images.load import load_frame_from_path
 from depth.images.upscale import upscale_size_2n_plus_2
 from depth.model.build import make_model
+from depth.model.patch_flow import PatchFlowEstimator
 from depth.train.build import generate_zero_priors
 from depth.model.settings import ModelSettings
 
@@ -36,10 +37,12 @@ def build_image_grid(pyramid1: Sequence[jax.Array],
                      pyramid2: Sequence[jax.Array],
                      flow_with_loss: Sequence[jax.Array]) -> Figure:
     rows = len(pyramid1)
-    fig, axs = plt.subplots(rows, 6, figsize=(12, 2 * rows))
-    column_titles = ['Frame1', 'Reflowed-F2->F1', 'Frame2', 'loss', 'flow-y', 'flow-x']
+    cols = 8
+    fig, axs = plt.subplots(rows, cols, figsize=(2 * cols, 2 * rows))
+    column_titles = ['Frame1', 'Reflowed-F2->F1', 'Frame2', 'frame-diff', 'reflow-diff',
+                     'loss', 'flow-y', 'flow-x']
     if rows == 1:
-        axs = [axs] #pyplot doesn't return a list when the there's a single row/col.
+        axs = [axs]  # pyplot doesn't return a list when the there's a single row/col.
     for i, ax in enumerate(axs[0]):
         ax.set_title(column_titles[i], fontsize=14, pad=10)  # Set title for top subplot in column
 
@@ -48,10 +51,12 @@ def build_image_grid(pyramid1: Sequence[jax.Array],
         reflowed_img2 = apply_flow_entire_image(img2[0], flow[0, :, :, 0:2])
         ax[1].imshow(reflowed_img2, cmap="grey", vmin=0, vmax=1)
         ax[2].imshow(img2[0], cmap="grey", vmin=0, vmax=1)
-        ax[3].imshow(flow[0, :, :, 2:3], cmap="grey", vmin=0, vmax=1)
+        ax[3].imshow(img2[0] - img1[0], cmap="coolwarm", vmin=-1, vmax=1)
+        ax[4].imshow(reflowed_img2[:, :, None] - img1[0], cmap="coolwarm", vmin=-1, vmax=1)
+        ax[5].imshow(flow[0, :, :, 2:3], cmap="grey", vmin=0, vmax=1)
         flow_max = max_expected_flow(rows - i - 1)
-        ax[4].imshow(flow[0, :, :, 1:2], cmap="coolwarm", vmin=-flow_max, vmax=flow_max)
-        ax[5].imshow(flow[0, :, :, 0:1], cmap="coolwarm", vmin=-flow_max, vmax=flow_max)
+        ax[6].imshow(flow[0, :, :, 1:2], cmap="coolwarm", vmin=-flow_max, vmax=flow_max)
+        ax[7].imshow(flow[0, :, :, 0:1], cmap="coolwarm", vmin=-flow_max, vmax=flow_max)
         for axc in ax:
             axc.set_axis_off()
     plt.tight_layout()
@@ -100,3 +105,54 @@ def log_train_progress(aux, global_step, loss_value, writer):
         f"    Levels losses: {aux['levels_losses']}\n"
         f"    Levels weights: {aux['levels_weights']}\n"
     )
+
+
+def visualize_shift_conv_weights(model: PatchFlowEstimator) -> np.ndarray:
+    """
+    Generates an image from the shift_conv kernel weights for visualization.
+
+    The function extracts the 2x2 filters, normalizes each filter's weights
+    to the [0, 1] range, and arranges them into a grid.
+
+    Args:
+        model: An instance of the PatchFlowEstimator model.
+
+    Returns:
+        A single numpy array representing the grid of filter weights in the
+        format (H, W, 1), suitable for logging as an image to TensorBoard.
+    """
+    # The kernel is a depthwise convolution, so its shape is
+    # (2, 2, 1, 8 * num_channels)
+    weights = model.shift_conv.kernel
+
+    # Squeeze the grouped input channel dim, shape becomes (2, 2, 8 * num_channels)
+    weights = jnp.squeeze(weights, axis=2)
+
+    # Transpose to (num_filters, H, W) -> (8 * num_channels, 2, 2)
+    weights = jnp.transpose(weights, (2, 0, 1))
+
+    # Normalize each 2x2 filter individually to the [0, 1] range
+    min_vals = jnp.min(weights, axis=(1, 2), keepdims=True)
+    max_vals = jnp.max(weights, axis=(1, 2), keepdims=True)
+    # Add a small epsilon to avoid division by zero for constant-valued filters
+    normalized_weights = (weights - min_vals) / (max_vals - min_vals + 1e-6)
+
+    # We have 8 * num_channels filters. Let's arrange them in a grid.
+    # A grid with 4 rows is a reasonable choice.
+    num_filters = normalized_weights.shape[0]
+    grid_rows = 4
+    grid_cols = num_filters // grid_rows
+
+    # Reshape into a grid of filters: (grid_rows, grid_cols, 2, 2)
+    grid = normalized_weights.reshape(grid_rows, grid_cols, 2, 2)
+
+    # Transpose and reshape to form a single image:
+    # (grid_rows, 2, grid_cols, 2) -> (grid_rows * 2, grid_cols * 2)
+    grid = grid.transpose(0, 2, 1, 3)
+    image = grid.reshape(grid_rows * 2, grid_cols * 2)
+
+    # Add a channel dimension for image logging (H, W, C)
+    image_with_channel = jnp.expand_dims(image, axis=-1)
+
+    # Return as a NumPy array for compatibility with I/O and logging libraries
+    return np.asarray(image_with_channel)

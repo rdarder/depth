@@ -1,7 +1,7 @@
 import jax
 import jax.numpy as jnp
 
-from depth.patches.difference import sum_of_absolute_differences, normalized_cross_correlation
+from depth.patches.difference import sum_of_absolute_differences
 from depth.patches.shift import shifted_center_patch
 
 
@@ -23,7 +23,7 @@ def patch_flow_loss(patch1: jax.Array, patch2: jax.Array, flow: jax.Array) -> ja
     assert patch1.shape == patch2.shape
     patch1_center = shifted_center_patch(patch1, -flow / 2)
     patch2_shifted = shifted_center_patch(patch2, flow / 2)
-    return jnp.mean(normalized_cross_correlation(patch1_center, patch2_shifted))
+    return jnp.mean(sum_of_absolute_differences(patch1_center, patch2_shifted))
 
 
 def test_patch_flow_loss_exact_match():
