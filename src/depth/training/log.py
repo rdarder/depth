@@ -40,7 +40,7 @@ def build_image_grid(pyramid1: Sequence[jax.Array],
     cols = 8
     fig, axs = plt.subplots(rows, cols, figsize=(2 * cols, 2 * rows))
     column_titles = ['Frame1', 'Reflowed-F2->F1', 'Frame2', 'frame-diff', 'reflow-diff',
-                     'loss', 'flow-y', 'flow-x']
+                     'loss', 'flow-x', 'flow-y']
     if rows == 1:
         axs = [axs]  # pyplot doesn't return a list when the there's a single row/col.
     for i, ax in enumerate(axs[0]):
