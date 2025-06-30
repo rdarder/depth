@@ -4,14 +4,11 @@ import jax
 from flax import nnx
 from flax.nnx import Rngs
 from jax import numpy as jnp
-
-from depth.images.separable_convolution import conv_output_size
 from depth.patches.extract import extract_patches_nhwc
 
 
 class PatchFlowEstimator(nnx.Module):
-    def __init__(self, patch_size: int, num_channels: int, features: int = 32,
-                 mlp_hidden_size: int = 16, *, train: bool, rngs: Rngs):
+    def __init__(self, patch_size: int, num_channels: int, *, train: bool, rngs: Rngs):
         assert patch_size > 3
         self.patch_size = patch_size
 
@@ -52,7 +49,7 @@ class PatchFlowEstimator(nnx.Module):
         self.bn_hidden2 = nnx.BatchNorm(num_features=16, use_running_average=not train, rngs=rngs)
         self.mlp_output = nnx.Linear(
             in_features=16,
-            out_features=2,  # TODO: add confidence prediction here.
+            out_features=2,
             use_bias=True,
             rngs=rngs,
         )
@@ -81,8 +78,7 @@ class PatchFlowEstimator(nnx.Module):
 
 def test_patch_flow_estimator():
     rngs = nnx.Rngs(0)
-    estimator = PatchFlowEstimator(patch_size=4, num_channels=2, features=8, mlp_hidden_size=16,
-                                   train=False, rngs=rngs)
+    estimator = PatchFlowEstimator(patch_size=4, num_channels=2, train=False, rngs=rngs)
     canvas = jax.random.uniform(jax.random.key(0), (2, 7, 9, 2))  # B,H,W,C
     frame1 = canvas[:, 1:, 1:, :]
     frame2 = canvas[:, :-1, :-1, :]
@@ -96,8 +92,7 @@ def test_patch_flow_estimator():
 
 def test_patch_flow_estimator_patch_size5():
     rngs = nnx.Rngs(0)
-    estimator = PatchFlowEstimator(patch_size=5, num_channels=2, features=8, mlp_hidden_size=16,
-                                   train=False, rngs=rngs)
+    estimator = PatchFlowEstimator(patch_size=5, num_channels=2, train=False, rngs=rngs)
     canvas = jax.random.uniform(jax.random.key(0), (2, 8, 10, 2))  # B,H,W,C
     frame1 = canvas[:, 1:, 1:, :]
     frame2 = canvas[:, :-1, :-1, :]

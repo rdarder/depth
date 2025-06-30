@@ -11,8 +11,6 @@ def make_model(seed: int, train: bool, settings: ModelSettings) -> PyramidFlowEs
     patch_flow_estimator = PatchFlowEstimator(
         patch_size=settings.patch_size,
         num_channels=1,
-        features=settings.predictor_features,
-        mlp_hidden_size=settings.mlp_hidden_size,
         train=train,
         rngs=rngs
     )
