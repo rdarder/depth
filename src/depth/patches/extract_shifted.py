@@ -23,7 +23,7 @@ def extract_single_shifted_patch(img: jax.Array, offset: jax.Array, patch_size: 
     return patch
 
 
-def extract_shifted_patches_nchw(frame, frame_int_flow, patch_size: int, stride: int):
+def extract_shifted_patches_nchw(frame, frame_int_flow, patch_size: int, stride: int) -> jax.Array:
     """ Extract patches of size patch_size from an image given a flow map.
 
     The flow is to be interpreted as: the flow entry i,j determines that the patch will be
@@ -31,11 +31,9 @@ def extract_shifted_patches_nchw(frame, frame_int_flow, patch_size: int, stride:
     Works on a single frame, single_frame: C, H, W
     frame_int_flow: 2, conv_output_size(H, patch_size, stride),
                        conv_output_size(W, patch_size, stride)
-    Returns the extracted patches and a grid of booleans telling whether the patch was within
-    bounds. When the patch was not within bounds, the patch will still be returned but
-    clamped according to jax.lax.dynamic_slice behavior.
+    Returns the extracted patches. When the patch was not within bounds,
+    the patch will still be returned but clamped according to jax.lax.dynamic_slice behavior.
         C * (H-patch_size+1) * (W-patch_size+1), patch_size, patch_size,
-        C * (H-patch_size+1) * (W-patch_size+1), 1 (bool)
     """
     H, W, C = frame.shape
     FH, FW, F = frame_int_flow.shape
@@ -48,18 +46,32 @@ def extract_shifted_patches_nchw(frame, frame_int_flow, patch_size: int, stride:
     grid = jnp.stack(grid_pair, axis=-1) * stride
     offsets_grid = grid + frame_int_flow
     offsets_grid_flat = offsets_grid.reshape(-1, 2)  # (FH*FW, 2)
-    valid_coords_flat = get_valid_offsets_flat(offsets_grid_flat, H, W, patch_size)
 
     extract_all_patches = jax.vmap(extract_single_shifted_patch, in_axes=(None, 0, None))
     patches = extract_all_patches(frame, offsets_grid_flat, patch_size)
-    return (
-        patches.reshape(FH, FW, patch_size, patch_size, C),
-        valid_coords_flat.reshape(FH, FW)
-    )
+    return patches.reshape(FH, FW, patch_size, patch_size, C)
+
+
+def flow_lands_within_frame(frame_int_flow, frame_height: int, frame_width: int,
+                            patch_size: int, stride: int) -> jax.Array:
+    # return shape: C * (H - patch_size + 1) * (W - patch_size + 1), 1(bool)
+    FH, FW, F = frame_int_flow.shape
+    assert F == 2
+    assert FH == conv_output_size(frame_height, patch_size, stride)
+    assert FW == conv_output_size(frame_width, patch_size, stride)
+    grid_pair = jnp.meshgrid(jnp.arange(FH), jnp.arange(FW), indexing='ij')
+    grid = jnp.stack(grid_pair, axis=-1) * stride
+    offsets_grid = grid + frame_int_flow
+    offsets_grid_flat = offsets_grid.reshape(-1, 2)  # (FH*FW, 2)
+    valid_coords_flat = get_valid_offsets_flat(offsets_grid_flat, frame_height,
+                                               frame_width, patch_size)
+    return valid_coords_flat.reshape(FH, FW)
 
 
 batch_extract_shifted_patches_nchw = jax.vmap(extract_shifted_patches_nchw,
                                               in_axes=(0, 0, None, None))
+batch_flow_lands_within_frame = jax.vmap(flow_lands_within_frame,
+                                         in_axes=(0, None, None, None, None))
 
 
 def test_extract_single_patch():
@@ -76,7 +88,17 @@ def test_extract_shifted_patches():
         [[1, 1], [-1, 0]]
     ])
 
-    patches, valid_grid = extract_shifted_patches_nchw(canvas, flow, 2, 2)
+    patches = extract_shifted_patches_nchw(canvas, flow, 2, 2)
     assert jnp.all(patches[0, 0, :, :, 0] == canvas[0:2, 0:2, 0])
     assert jnp.all(patches[1, 1, :, :, 0] == canvas[1:3, 2:4, 0])
+
+
+def test_flow_lands_within_frame():
+    flow = jnp.array([
+        [[0, 0], [-1, 0]],
+        [[1, 1], [-1, 0]]
+    ])
+    valid_grid = flow_lands_within_frame(flow,
+                                         frame_height=4, frame_width=4, patch_size=2, stride=2)
+
     assert jnp.all(valid_grid == jnp.array([[True, False], [False, True]]))

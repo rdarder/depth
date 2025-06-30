@@ -10,7 +10,9 @@ from matplotlib.figure import Figure
 from tensorboardX import SummaryWriter
 
 from depth.images.load import load_frame_from_path
+from depth.images.pyramid import build_image_pyramid
 from depth.images.upscale import upscale_size_2n_plus_2
+from depth.loss.frame_pair_pyramid_loss import frame_pair_pyramid_loss
 from depth.model.build import make_model
 from depth.model.patch_flow import PatchFlowEstimator
 from depth.train.build import generate_zero_priors
@@ -33,10 +35,8 @@ def max_expected_flow(inv_level: int):
         return 0.5 + 2 * max_expected_flow(inv_level - 1)
 
 
-def build_image_grid(pyramid1: Sequence[jax.Array],
-                     pyramid2: Sequence[jax.Array],
-                     flow_with_loss: Sequence[jax.Array]) -> Figure:
-    rows = len(pyramid1)
+def build_image_grid(aux_pyramid: Sequence[dict]) -> Figure:
+    rows = len(aux_pyramid)
     cols = 8
     fig, axs = plt.subplots(rows, cols, figsize=(2 * cols, 2 * rows))
     column_titles = ['Frame1', 'Reflowed-F2->F1', 'Frame2', 'frame-diff', 'reflow-diff',
@@ -46,27 +46,29 @@ def build_image_grid(pyramid1: Sequence[jax.Array],
     for i, ax in enumerate(axs[0]):
         ax.set_title(column_titles[i], fontsize=14, pad=10)  # Set title for top subplot in column
 
-    for i, (img1, img2, flow, ax) in enumerate(zip(pyramid1, pyramid2, flow_with_loss, axs)):
-        ax[0].imshow(img1[0], cmap="grey", vmin=0, vmax=1)
-        reflowed_img2 = apply_flow_entire_image(img2[0], flow[0, :, :, 0:2])
+    for i, (aux, ax) in enumerate(zip(aux_pyramid, axs)):
+        f1 = aux['frame1'][0]
+        f2 = aux['frame2'][0]
+        flow = aux['flow'][0]
+        loss = aux['loss_grid'][0]
+        ax[0].imshow(f1, cmap="grey", vmin=0, vmax=1)
+        reflowed_img2 = apply_flow_entire_image(f2, flow)
         ax[1].imshow(reflowed_img2, cmap="grey", vmin=0, vmax=1)
-        ax[2].imshow(img2[0], cmap="grey", vmin=0, vmax=1)
-        ax[3].imshow(img2[0] - img1[0], cmap="coolwarm", vmin=-0.2, vmax=0.2)
-        ax[4].imshow(reflowed_img2[:, :, None] - img1[0], cmap="coolwarm", vmin=-0.2, vmax=0.2)
-        ax[5].imshow(flow[0, :, :, 2:3], cmap="grey", vmin=0, vmax=0.2)
+        ax[2].imshow(f2, cmap="grey", vmin=0, vmax=1)
+        ax[3].imshow(f2 - f1, cmap="coolwarm", vmin=-0.1, vmax=0.1)
+        ax[4].imshow(reflowed_img2[:, :, None] - f1, cmap="coolwarm", vmin=-0.1, vmax=0.1)
+        ax[5].imshow(loss, cmap="grey", vmin=0, vmax=0.1)
         flow_max = max_expected_flow(rows - i - 1)
-        ax[6].imshow(flow[0, :, :, 1:2], cmap="coolwarm", vmin=-flow_max, vmax=flow_max)
-        ax[7].imshow(flow[0, :, :, 0:1], cmap="coolwarm", vmin=-flow_max, vmax=flow_max)
+        ax[6].imshow(flow[:, :, 1:2], cmap="coolwarm", vmin=-flow_max, vmax=flow_max)
+        ax[7].imshow(flow[:, :, 0:1], cmap="coolwarm", vmin=-flow_max, vmax=flow_max)
         for axc in ax:
             axc.set_axis_off()
     plt.tight_layout()
     return fig
 
 
-def log_flow_grid(pyramid1: Sequence[jax.Array],
-                  pyramid2: Sequence[jax.Array],
-                  flow_with_loss: Sequence[jax.Array], writer: SummaryWriter, step: int):
-    fig = build_image_grid(pyramid1, pyramid2, flow_with_loss)
+def log_flow_grid(aux_pyramid: Sequence[dict], writer: SummaryWriter, step: int):
+    fig = build_image_grid(aux_pyramid)
     fig.canvas.draw()
     img = np.array(fig.canvas.renderer.buffer_rgba())
     plt.close(fig)
@@ -80,11 +82,12 @@ def plot_inference_grid():
     frame2_path = resources.files('depth.test_fixtures') / "frame2.png"
     frame1 = load_frame_from_path(str(frame1_path), settings.img_size)
     frame2 = load_frame_from_path(str(frame2_path), settings.img_size)
+    levels = settings.levels
+    pyramid1 = build_image_pyramid(frame1[None, :, :, :], levels=levels, keep=levels)
+    pyramid2 = build_image_pyramid(frame2[None, :, :, :], levels=levels, keep=levels)
     priors = generate_zero_priors(1, settings)
-
-    flow_with_loss_pyramid, p1, p2 = model(frame1[None, :, :, :], frame2[None, :, :, :], priors)
-
-    build_image_grid(p1, p2, flow_with_loss_pyramid)
+    _, aux_pyramid = frame_pair_pyramid_loss(model, pyramid1, pyramid2, priors)
+    build_image_grid(aux_pyramid)
     plt.show()
 
 
@@ -92,18 +95,30 @@ if __name__ == '__main__':
     plot_inference_grid()
 
 
-def log_train_progress(aux, global_step, loss_value, writer):
-    coarse_to_fine_losses = reversed(aux['levels_losses'])
-    for i, level_loss in enumerate(coarse_to_fine_losses):
-        writer.add_scalar(f"level_loss/{i}", level_loss, global_step)
+def fmt_float(f: float) -> str:
+    return f"{f:.5f}"
+
+
+def log_train_progress(
+        aux_pyramid: Sequence[dict],
+        global_step,
+        loss_value,
+        writer
+):
+    # coarse_to_fine_losses = reversed(aux['levels_losses'])
+    for i, level_aux in enumerate(reversed(aux_pyramid)):
+        writer.add_scalar(f"level_loss/{i}", level_aux['loss'], global_step)
     writer.add_scalar("train_loss", loss_value, global_step)
-    log_flow_grid(aux['pyramid1'], aux['pyramid2'], aux['flow_with_loss'], writer,
-                  global_step)
+    log_flow_grid(aux_pyramid, writer, global_step)
+    level_losses = ' '.join([fmt_float(level['loss'].item()) for level in reversed(aux_pyramid)])
+    level_weights = ' '.join([fmt_float(level['loss_weight'].item()) for level in reversed(
+        aux_pyramid)])
+
     print(
         f"Step {global_step:06}\n"
-        f"    Total Weighted Loss: {loss_value:.4f}\n"
-        f"    Levels losses: {aux['levels_losses']}\n"
-        f"    Levels weights: {aux['levels_weights']}\n"
+        f"    Weighted Loss:\t{fmt_float(loss_value)}\n"
+        f"    Levels losses:\t{level_losses}\n"
+        f"    Levels weights:\t{level_weights}\n"
     )
 
 

@@ -1,6 +1,6 @@
 import os
 from datetime import datetime
-from typing import Sequence
+from typing import Sequence, Any
 
 import flax.nnx as nnx
 import jax
@@ -9,9 +9,9 @@ import optax
 from orbax.checkpoint import StandardCheckpointer
 from tensorboardX import SummaryWriter
 
+from depth.loss.frame_pair_pyramid_loss import frame_pair_pyramid_loss_value_and_grad
 from depth.model.build import make_model
 from depth.train.build import generate_zero_priors
-from depth.model.loss import frame_pair_loss_value_with_grad
 from depth.model.multi_level_flow import PyramidFlowEstimator
 from depth.model.settings import Settings
 from depth.training.build import make_frame_pyramids_dataset
@@ -19,9 +19,12 @@ from depth.training.log import log_train_progress
 
 
 @nnx.jit
-def train_step(model: PyramidFlowEstimator, optimizer: nnx.Optimizer,
-               p1: Sequence[jax.Array], p2: Sequence[jax.Array], priors: jax.Array):
-    (loss, aux), grads = frame_pair_loss_value_with_grad(model, p1, p2, priors)
+def train_step(model: PyramidFlowEstimator,
+               optimizer: nnx.Optimizer,
+               p1: Sequence[jax.Array],
+               p2: Sequence[jax.Array],
+               priors: jax.Array) -> tuple[jax.Array, Sequence[dict[str, Any]]]:
+    (loss, aux), grads = frame_pair_pyramid_loss_value_and_grad(model, p1, p2, priors)
     optimizer.update(grads)
     return loss, aux
 

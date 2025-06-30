@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 import jax
 import jax.numpy as jnp
 from flax import nnx
@@ -6,8 +7,8 @@ from flax import nnx
 from depth.images.separable_convolution import conv_output_size
 from depth.model.patch_flow import PatchFlowEstimator
 from depth.patches.extract import extract_patches_nhwc
-from depth.patches.extract_shifted import batch_extract_shifted_patches_nchw
-from depth.patches.loss_grid import patch_flow_loss_grid
+from depth.patches.extract_shifted import (batch_extract_shifted_patches_nchw,
+                                           batch_flow_lands_within_frame)
 
 
 class LevelFlowEstimator(nnx.Module):
@@ -16,34 +17,42 @@ class LevelFlowEstimator(nnx.Module):
         self.patch_size = flow_estimator.patch_size
         self.stride = stride
 
-    def __call__(self, img1: jax.Array, img2: jax.Array, prior: jax.Array):
+    def __call__(self, frame1: jax.Array, frame2: jax.Array, prior: jax.Array) -> (
+            tuple[jax.Array, dict]
+    ):
         # shape of img1, img2: (B, H, W, C)
         # shape of prior: (B, PY, PX, 2)
-        # returns (B, PY, PX, 3) (dy, dx, loss)
-        assert img1.shape == img2.shape
-        B, PY, PX, F = prior.shape
+        # returns (B, PY, PX, 3) (dy, dx)
+        assert frame1.shape == frame2.shape
+        B, H, W, C = frame1.shape
+        PB, PY, PX, F = prior.shape
         assert F == 2
+        assert B == PB
 
         patches1 = extract_patches_nhwc(
-            img1, self.patch_size, self.stride
+            frame1, self.patch_size, self.stride
         )  # B, PY, PX, PH, PW, C
 
         int_priors = jnp.round(prior).astype(jnp.int32)
         remainder_priors = prior - int_priors
 
-        patches2, patch_validity = batch_extract_shifted_patches_nchw(
-            img2, int_priors, self.patch_size, self.stride
-        )
+        patches2 = batch_extract_shifted_patches_nchw(frame2, int_priors, self.patch_size,
+                                                      self.stride)
+        valid_patches = batch_flow_lands_within_frame(int_priors, H, W, self.patch_size,
+                                                      self.stride)
         remainder_priors_flat = remainder_priors.reshape(B * PY * PX, 2)
         residual_flow_flat = self._flow_estimator(patches1, patches2, remainder_priors_flat)
         residual_flow = residual_flow_flat.reshape(B, PY, PX, 2)
         remainder_flow = remainder_priors + residual_flow
         flow = int_priors + remainder_flow
-        loss = patch_flow_loss_grid(patches1, patches2, remainder_flow)[:, :, :, None]
-        flow_with_loss = jnp.concatenate(
-            [flow, loss], axis=-1
-        )  # B, PY, PX, 3 (dy, dx, loss)
-        return flow_with_loss
+        aux = dict(
+            frame1=frame1,
+            frame2=frame2,
+            valid_patches=valid_patches,
+            patches1=patches1,
+            patches2=patches2
+        )
+        return flow, aux  # B, PY, PX, 2 (dy, dx, loss, patch_validity)
 
 
 def test_single_level_flow_estimator():
@@ -57,6 +66,9 @@ def test_single_level_flow_estimator():
     patches_y = conv_output_size(6, 4, 2)
     patches_x = conv_output_size(8, 4, 2)
     prior = jax.random.uniform(jax.random.key(2), (3, patches_y, patches_x, 2))
-    flow = level_flow_estimator(img, img, prior)
+    flow, aux = level_flow_estimator(img, img, prior)
     B, PY, PX, F = prior.shape
-    assert flow.shape == (B, PY, PX, F + 1)
+    assert flow.shape == (B, PY, PX, F)
+    assert aux['valid_patches'].shape == (B, PY, PX)
+    assert aux['valid_patches'].dtype == jnp.bool
+    assert aux['patches1'].shape == aux['patches2'].shape == (B, PY, PX, 4, 4, 2)

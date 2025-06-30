@@ -30,15 +30,17 @@ class PyramidFlowEstimator(nnx.Module):
         assert prior.shape == expected_prior_shape
 
     def __call__(self, pyramid1: Sequence[jax.Array], pyramid2: Sequence[jax.Array],
-                 prior: jax.Array) -> Sequence[jax.Array]:
-        flows_with_losses = []
+                 prior: jax.Array) -> tuple[Sequence[jax.Array], Sequence[dict]]:
+        flow_pyramid = []
+        aux_pyramid = []
         self._check_prior_shape(pyramid1[-1], prior)
         for img1, img2 in zip(reversed(pyramid1), reversed(pyramid2)):
-            flow_with_loss = self._level_flow_estimator(img1, img2, prior)
-            flows_with_losses.append(flow_with_loss)
-            upscaled_values = upscale_values_2n_plus2(flow_with_loss[:, :, :, 0:2])
+            flow, aux = self._level_flow_estimator(img1, img2, prior)
+            flow_pyramid.append(flow)
+            aux_pyramid.append(aux)
+            upscaled_values = upscale_values_2n_plus2(flow)
             prior = upscale_size_2n_plus_2(upscaled_values)
-        return flows_with_losses[::-1]
+        return flow_pyramid[::-1], aux_pyramid[::-1]
 
 
 def test_multi_level_flow_estimator():
@@ -57,10 +59,13 @@ def test_multi_level_flow_estimator():
     pyramid1 = build_image_pyramid(batch1, levels=5, keep=5)
     pyramid2 = build_image_pyramid(batch2, levels=5, keep=5)
     prior = jnp.zeros((2, 3, 3, 2), jnp.float32)
-    flow_with_loss_pyramid = pyramid_flow_estimator(pyramid1, pyramid2, prior)
-    jax.block_until_ready(flow_with_loss_pyramid)
-    assert flow_with_loss_pyramid[-1].shape == (2, 3, 3, 3)
-    assert flow_with_loss_pyramid[-2].shape == (2, 8, 8, 3)
-    assert flow_with_loss_pyramid[-3].shape == (2, 18, 18, 3)
-    assert flow_with_loss_pyramid[-4].shape == (2, 38, 38, 3)
-    assert flow_with_loss_pyramid[-5].shape == (2, 78, 78, 3)
+    flow_pyramid, aux_pyramid = pyramid_flow_estimator(pyramid1, pyramid2, prior)
+    jax.block_until_ready(flow_pyramid)
+    assert flow_pyramid[-1].shape == (2, 3, 3, 2)
+    assert flow_pyramid[-2].shape == (2, 8, 8, 2)
+    assert flow_pyramid[-3].shape == (2, 18, 18, 2)
+    assert flow_pyramid[-4].shape == (2, 38, 38, 2)
+    assert flow_pyramid[-5].shape == (2, 78, 78, 2)
+    assert aux_pyramid[-1]['patches1'].shape == (2, 3, 3, 4, 4, 1)
+    assert aux_pyramid[-1]['patches2'].shape == (2, 3, 3, 4, 4, 1)
+    assert aux_pyramid[-1]['valid_patches'].shape == (2, 3, 3)
