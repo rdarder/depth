@@ -12,7 +12,7 @@ from tensorboardX import SummaryWriter
 from depth.loss.frame_pair_pyramid_loss import frame_pair_pyramid_loss_value_and_grad
 from depth.model.build import make_model
 from depth.train.build import generate_zero_priors
-from depth.model.multi_level_flow import PyramidFlowEstimator
+from depth.model.pyramid_flow import PyramidFlowEstimator
 from depth.model.settings import Settings
 from depth.training.build import make_frame_pyramids_dataset
 from depth.training.log import log_train_progress

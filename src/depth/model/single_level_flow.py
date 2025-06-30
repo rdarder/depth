@@ -42,7 +42,7 @@ class LevelFlowEstimator(nnx.Module):
                                                       self.stride)
         remainder_priors_flat = remainder_priors.reshape(B * PY * PX, 2)
         residual_flow_flat = self._flow_estimator(patches1, patches2, remainder_priors_flat)
-        residual_flow = residual_flow_flat.reshape(B, PY, PX, 2)
+        residual_flow, scores = jnp.split(residual_flow_flat.reshape(B, PY, PX, 4), 2, axis=-1)
         remainder_flow = remainder_priors + residual_flow
         flow = int_priors + remainder_flow
         aux = dict(
@@ -52,7 +52,9 @@ class LevelFlowEstimator(nnx.Module):
             patches1=patches1,
             patches2=patches2
         )
-        return flow, aux  # B, PY, PX, 2 (dy, dx, loss, patch_validity)
+        flow_with_scores = jnp.concatenate([flow, scores], axis=-1)
+        return (flow_with_scores,  # B, PY, PX, 4 (dy, dx, confidence, patch_score)
+                aux)
 
 
 def test_single_level_flow_estimator():
@@ -68,7 +70,7 @@ def test_single_level_flow_estimator():
     prior = jax.random.uniform(jax.random.key(2), (3, patches_y, patches_x, 2))
     flow, aux = level_flow_estimator(img, img, prior)
     B, PY, PX, F = prior.shape
-    assert flow.shape == (B, PY, PX, F)
+    assert flow.shape == (B, PY, PX, 4)
     assert aux['valid_patches'].shape == (B, PY, PX)
     assert aux['valid_patches'].dtype == jnp.bool
     assert aux['patches1'].shape == aux['patches2'].shape == (B, PY, PX, 4, 4, 2)

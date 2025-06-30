@@ -49,7 +49,7 @@ class PatchFlowEstimator(nnx.Module):
         self.bn_hidden2 = nnx.BatchNorm(num_features=16, use_running_average=not train, rngs=rngs)
         self.mlp_output = nnx.Linear(
             in_features=16,
-            out_features=2,
+            out_features=4,
             use_bias=True,
             rngs=rngs,
         )
@@ -72,7 +72,7 @@ class PatchFlowEstimator(nnx.Module):
         non_linear_hidden2 = jax.nn.relu(bn_hidden_state2)
         output = self.mlp_output(non_linear_hidden2)
         norm_output = jax.nn.tanh(output)
-        norm_output_grid = norm_output.reshape(B, PH, PW, 2)  # add confidence here.
+        norm_output_grid = norm_output.reshape(B, PH, PW, 4)
         return norm_output_grid
 
 
@@ -87,7 +87,8 @@ def test_patch_flow_estimator():
     priors = jnp.zeros((2, 2, 3, 2))
     # Pass use_running_average to the __call__ method
     flow_delta = estimator(patches1, patches2, priors)
-    assert flow_delta.shape == priors.shape
+    B, PH, PW, F = priors.shape
+    assert flow_delta.shape == (B, PH, PW, 4)
 
 
 def test_patch_flow_estimator_patch_size5():
@@ -101,4 +102,5 @@ def test_patch_flow_estimator_patch_size5():
     priors = jnp.zeros((2, 2, 3, 2))
     # Pass use_running_average to the __call__ method
     flow_delta = estimator(patches1, patches2, priors)
-    assert flow_delta.shape == priors.shape
+    B, PH, PW, F = priors.shape
+    assert flow_delta.shape == (B, PH, PW, 4)

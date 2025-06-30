@@ -8,7 +8,7 @@ from flax import nnx
 from depth.images.load import load_frame_from_path
 from depth.images.pyramid import build_image_pyramid
 from depth.images.separable_convolution import conv_output_size
-from depth.model.multi_level_flow import PyramidFlowEstimator
+from depth.model.pyramid_flow import PyramidFlowEstimator
 from depth.model.patch_flow import PatchFlowEstimator
 from depth.model.single_level_flow import LevelFlowEstimator
 from depth.loss.flow_loss import calc_flow_loss
@@ -17,8 +17,8 @@ from depth.loss.flow_loss import calc_flow_loss
 def calc_flow_pyramid_loss(flow_pyramid: Sequence[jax.Array], aux_pyramid: Sequence[dict]) -> (
         Sequence[jax.Array]):
     losses = []
-    for flow, aux in zip(reversed(flow_pyramid), reversed(aux_pyramid)):
-        loss = calc_flow_loss(flow, aux)
+    for flow_with_scores, aux in zip(reversed(flow_pyramid), reversed(aux_pyramid)):
+        loss = calc_flow_loss(flow_with_scores, aux)
         losses.append(loss)
     return losses[::-1]
 

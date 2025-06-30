@@ -1,6 +1,6 @@
 from flax import nnx as nnx
 
-from depth.model.multi_level_flow import PyramidFlowEstimator
+from depth.model.pyramid_flow import PyramidFlowEstimator
 from depth.model.patch_flow import PatchFlowEstimator
 from depth.model.settings import ModelSettings
 from depth.model.single_level_flow import LevelFlowEstimator

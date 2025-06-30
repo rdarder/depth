@@ -5,7 +5,7 @@ import jax.numpy as jnp
 from flax import nnx
 
 from depth.loss.flow_pyramid_loss import calc_flow_pyramid_loss
-from depth.model.multi_level_flow import PyramidFlowEstimator
+from depth.model.pyramid_flow import PyramidFlowEstimator
 
 
 def frame_pair_pyramid_loss(model: PyramidFlowEstimator,
