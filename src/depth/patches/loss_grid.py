@@ -5,7 +5,7 @@ from depth.patches.loss import patch_flow_loss
 
 
 def patch_match_score_loss(l_patch, l_mid, l=2.0):
-    return 1 - 2 / (1 + jnp.exp(l * (jnp.abs(l_patch - l_mid)) / (l_mid + 1e-6)))
+    return 1 / (1 + jnp.exp(l * (l_patch - l_mid) / (l_mid + 1e-6)))
 
 
 def patch_flow_loss_grid(patches1: jax.Array, patches2: jax.Array, flow: (jax.Array),
