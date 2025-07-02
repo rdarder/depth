@@ -22,8 +22,11 @@ class FlowUpscaler(nnx.Module):
         B, H, W, S = input_flow_with_scores.shape
         assert S == 5
         q = self.conv_q(input_flow_with_scores)
+        q = jax.nn.relu(q)
         k = self.conv_k(input_flow_with_scores)
+        k = jax.nn.relu(k)
         v = self.conv_v(input_flow_with_scores)
+        v = jax.nn.relu(v)
         # print_shapes(input_flow_with_scores=input_flow_with_scores, q=q, k=k, v=v)
 
         pad_q = jnp.pad(q, ((0, 0), (1, 1), (1, 1), (0, 0)), mode="constant")
@@ -87,6 +90,6 @@ def test_upscale_flow():
     rngs = nnx.Rngs(0)
     flow_with_scores = jax.random.normal(rngs.flow(), (2, 8, 7, 5))
     upscaler = FlowUpscaler(rngs=rngs)
-    upscaled_flow, confidence  = upscaler(flow_with_scores)
+    upscaled_flow, confidence = upscaler(flow_with_scores)
     assert upscaled_flow.shape == (2, 16, 14, 2)
     assert confidence.shape == (2, 16, 14, 1)
