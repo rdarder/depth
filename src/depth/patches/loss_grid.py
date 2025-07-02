@@ -32,5 +32,5 @@ def patch_flow_loss_grid(patches1: jax.Array, patches2: jax.Array, flow: (jax.Ar
     flat_losses = jax.vmap(patch_flow_loss)(flat_patches1, flat_patches2, flat_flow)
     mean_loss = jnp.mean(flat_losses, axis=-1)
     match_score_loss = patch_match_score_loss(flat_losses, mean_loss)
-    compound_loss = 1.0 * flat_losses + 0.1 * match_score_loss
+    compound_loss = 1.0 * flat_losses + 0.02 * match_score_loss
     return compound_loss.reshape(B, PY, PX)
