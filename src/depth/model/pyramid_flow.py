@@ -8,6 +8,7 @@ from flax import nnx
 from depth.images.load import load_frame_from_path
 from depth.images.pyramid import build_image_pyramid
 from depth.images.separable_convolution import conv_output_size
+from depth.images.upscale import upscale_values_2n_plus2
 from depth.model.patch_flow import PatchFlowEstimator
 from depth.model.single_level_flow import LevelFlowEstimator
 from depth.model.upscale import FlowUpscaler
@@ -43,7 +44,8 @@ class PyramidFlowEstimator(nnx.Module):
             aux['confidence'] = confidence
             aux_pyramid.append(aux)
             upscale_input = jnp.concatenate([flow_with_scores, confidence], axis=-1)
-            prior, confidence = self._upscaler(upscale_input)
+            upscaled_flow, confidence = self._upscaler(upscale_input)
+            prior = upscale_values_2n_plus2(upscaled_flow)
         return flow_pyramid[::-1], aux_pyramid[::-1]
 
 

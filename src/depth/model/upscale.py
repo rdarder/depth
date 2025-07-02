@@ -14,9 +14,7 @@ class FlowUpscaler(nnx.Module):
                                rngs=rngs)
         self.conv_v = nnx.Conv(in_features=5, out_features=1, kernel_size=(1, 1), strides=(1, 1),
                                rngs=rngs)
-        self.grid_weights = nnx.Param(jnp.ones((4, 9), dtype=jnp.float32) * 2)
-        # am hardcoding the (2x flow upscaling) as a weight initializer here.
-        # definitely not right.
+        self.grid_weights = nnx.Param(jnp.ones((4, 9), dtype=jnp.float32))
 
     def __call__(self, input_flow_with_scores: jax.Array):
         B, H, W, S = input_flow_with_scores.shape
