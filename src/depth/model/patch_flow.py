@@ -7,6 +7,14 @@ from jax import numpy as jnp
 from depth.patches.extract import extract_patches_nhwc
 
 
+def patches_score(patches: jax.Array) -> jax.Array:
+    patches_std_channel = jnp.std(patches, axis=(3, 4))
+    patches_std = jnp.mean(patches_std_channel, axis=-1)[:, :, :, None]
+    lam = 50.0
+    patches_scores = 1 - (jnp.exp(-lam * patches_std))
+    return patches_scores
+
+
 class PatchFlowEstimator(nnx.Module):
     def __init__(self, patch_size: int, num_channels: int, *, train: bool, rngs: Rngs):
         assert patch_size > 3
@@ -24,14 +32,14 @@ class PatchFlowEstimator(nnx.Module):
         )
         self.mix_shifts_conv = nnx.Conv(
             in_features=8 * num_channels,
-            out_features=30,
+            out_features=29,
             kernel_size=(1, 1),
             strides=(1, 1),
             padding='VALID',
             rngs=rngs,
             use_bias=False,
         )
-        self.bn_mix_shifts = nnx.BatchNorm(num_features=30, use_running_average=not train,
+        self.bn_mix_shifts = nnx.BatchNorm(num_features=29, use_running_average=not train,
                                            rngs=rngs)
         self.mlp_hidden = nnx.Linear(
             in_features=32,
@@ -49,13 +57,14 @@ class PatchFlowEstimator(nnx.Module):
         self.bn_hidden2 = nnx.BatchNorm(num_features=16, use_running_average=not train, rngs=rngs)
         self.mlp_output = nnx.Linear(
             in_features=16,
-            out_features=4,
+            out_features=3,
             use_bias=True,
             rngs=rngs,
         )
 
     def __call__(self, patch1: jnp.ndarray, patch2: jnp.ndarray, prior: jnp.ndarray):
         B, PH, PW, H, W, C = patch1.shape
+        patch2_score = patches_score(patch2)
         BP = B * PH * PW
         patches = jnp.stack([patch1, patch2], axis=-1).reshape(BP, H, W, C * 2)
         flat_priors = prior.reshape(B * PH * PW, 2)
@@ -63,8 +72,11 @@ class PatchFlowEstimator(nnx.Module):
         mixed_shifts = self.mix_shifts_conv(shifted_patches)
         bn_mixed_shifts = self.bn_mix_shifts(mixed_shifts)
         avg_abs_mixed_shifts = jnp.mean(jnp.abs(bn_mixed_shifts), axis=(1, 2)).reshape(BP, -1)
-        avg_shifts_and_priors = jnp.concatenate([avg_abs_mixed_shifts, flat_priors], axis=-1)
-        hidden_state = self.mlp_hidden(avg_shifts_and_priors)
+        patch2_std_flat = patch2_score.reshape(B * PH * PW, 1)
+        avg_shifts_priors_and_std = jnp.concatenate(
+            [avg_abs_mixed_shifts, flat_priors, patch2_std_flat],
+            axis=-1)
+        hidden_state = self.mlp_hidden(avg_shifts_priors_and_std)
         bn_hidden_state = self.bn_hidden1(hidden_state)
         non_linear_hidden = jax.nn.relu(bn_hidden_state)
         hidden_state2 = self.mlp_hidden2(non_linear_hidden)
@@ -72,8 +84,11 @@ class PatchFlowEstimator(nnx.Module):
         non_linear_hidden2 = jax.nn.relu(bn_hidden_state2)
         output = self.mlp_output(non_linear_hidden2)
         norm_output = jax.nn.tanh(output)
-        norm_output_grid = norm_output.reshape(B, PH, PW, 4)
-        return norm_output_grid
+        norm_output_grid = norm_output.reshape(B, PH, PW, 3)
+        norm_output_grid_with_patch_std = jnp.concatenate(
+            [norm_output_grid, patch2_score], axis=-1
+        )
+        return norm_output_grid_with_patch_std
 
 
 def test_patch_flow_estimator():

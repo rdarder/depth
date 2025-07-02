@@ -8,14 +8,15 @@ from flax import nnx
 from depth.images.load import load_frame_from_path
 from depth.images.pyramid import build_image_pyramid
 from depth.images.separable_convolution import conv_output_size
-from depth.images.upscale import upscale_size_2n_plus_2, upscale_values_2n_plus2
 from depth.model.patch_flow import PatchFlowEstimator
 from depth.model.single_level_flow import LevelFlowEstimator
+from depth.model.upscale import FlowUpscaler
 
 
 class PyramidFlowEstimator(nnx.Module):
-    def __init__(self, level_flow_estimator: LevelFlowEstimator):
+    def __init__(self, level_flow_estimator: LevelFlowEstimator, upscaler: FlowUpscaler):
         self._level_flow_estimator = level_flow_estimator
+        self._upscaler = upscaler
         self.patch_size = level_flow_estimator.patch_size
         self.stride = level_flow_estimator.stride
 
@@ -33,14 +34,16 @@ class PyramidFlowEstimator(nnx.Module):
                  prior: jax.Array) -> tuple[Sequence[jax.Array], Sequence[dict]]:
         flow_pyramid = []
         aux_pyramid = []
+        B, H, W, F = prior.shape
+        confidence = jnp.ones((B, H, W, 1), jnp.float32) * 0.5  # should probably come as a param.
         self._check_prior_shape(pyramid1[-1], prior)
         for img1, img2 in zip(reversed(pyramid1), reversed(pyramid2)):
             flow_with_scores, aux = self._level_flow_estimator(img1, img2, prior)
             flow_pyramid.append(flow_with_scores)
+            aux['confidence'] = confidence
             aux_pyramid.append(aux)
-            flow, scores = jnp.split(flow_with_scores, 2, axis=-1)
-            upscaled_values = upscale_values_2n_plus2(flow)
-            prior = upscale_size_2n_plus_2(upscaled_values)
+            upscale_input = jnp.concatenate([flow_with_scores, confidence], axis=-1)
+            prior, confidence = self._upscaler(upscale_input)
         return flow_pyramid[::-1], aux_pyramid[::-1]
 
 
@@ -55,8 +58,9 @@ def test_multi_level_flow_estimator():
     patch_flow_estimator = PatchFlowEstimator(
         patch_size=4, num_channels=1, train=False, rngs=rngs
     )
+    upscaler = FlowUpscaler(rngs=rngs)
     level_flow_estimator = LevelFlowEstimator(stride=2, flow_estimator=patch_flow_estimator)
-    pyramid_flow_estimator = PyramidFlowEstimator(level_flow_estimator)
+    pyramid_flow_estimator = PyramidFlowEstimator(level_flow_estimator, upscaler=upscaler)
     pyramid1 = build_image_pyramid(batch1, levels=5, keep=5)
     pyramid2 = build_image_pyramid(batch2, levels=5, keep=5)
     prior = jnp.zeros((2, 3, 3, 2), jnp.float32)

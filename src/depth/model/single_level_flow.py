@@ -22,7 +22,7 @@ class LevelFlowEstimator(nnx.Module):
     ):
         # shape of img1, img2: (B, H, W, C)
         # shape of prior: (B, PY, PX, 2)
-        # returns (B, PY, PX, 3) (dy, dx)
+        # returns (B, PY, PX, 3) (dy, dx, match_score)
         assert frame1.shape == frame2.shape
         B, H, W, C = frame1.shape
         PB, PY, PX, F = prior.shape
@@ -42,7 +42,7 @@ class LevelFlowEstimator(nnx.Module):
                                                       self.stride)
         remainder_priors_flat = remainder_priors.reshape(B * PY * PX, 2)
         residual_flow_flat = self._flow_estimator(patches1, patches2, remainder_priors_flat)
-        residual_flow, scores = jnp.split(residual_flow_flat.reshape(B, PY, PX, 4), 2, axis=-1)
+        residual_flow, scores = jnp.split(residual_flow_flat.reshape(B, PY, PX, 4), (2,), axis=-1)
         remainder_flow = remainder_priors + residual_flow
         flow = int_priors + remainder_flow
         aux = dict(
@@ -52,9 +52,12 @@ class LevelFlowEstimator(nnx.Module):
             patches1=patches1,
             patches2=patches2
         )
+        assert scores.shape == (B, PY, PX, 2)
         flow_with_scores = jnp.concatenate([flow, scores], axis=-1)
-        return (flow_with_scores,  # B, PY, PX, 4 (dy, dx, confidence, patch_score)
+        assert flow_with_scores.shape == (B, PY, PX, 4)
+        return (flow_with_scores,  # B, PY, PX, 4 (dy, dx, match_score, patch_score)
                 aux)
+        # TODO: add patch_score to aux
 
 
 def test_single_level_flow_estimator():

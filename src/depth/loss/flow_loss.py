@@ -15,9 +15,9 @@ def calc_flow_loss(flow_with_scores: jax.Array, aux: dict) -> jax.Array:
     shape of flow: (B, PY, PX, 2)
     where PY = conv_output_size(H, patch_size, patch_stride)
     """
-    flow, confidence, patch_score = jnp.split(flow_with_scores, (2, 3), axis=-1)
+    flow, match_score, patch_score = jnp.split(flow_with_scores, (2, 3), axis=-1)
     remainder_flow = flow - jnp.round(flow)
-    loss = patch_flow_loss_grid(aux['patches1'], aux['patches2'], remainder_flow)
+    loss = patch_flow_loss_grid(aux['patches1'], aux['patches2'], remainder_flow, match_score)
     return loss
 
 
