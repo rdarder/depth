@@ -49,7 +49,7 @@ class Train:
         epochs = self._settings.train.num_epochs
         for stage in range(self._settings.model.levels - 1):
             global_step = self.single_level_train_loop(stage, global_step, epochs)
-            epochs = 2 * epochs
+            epochs = epochs + 2
             self._save_checkpoint(f"{stage}-final")
         print("Training finished.")
         self._logger.close()
