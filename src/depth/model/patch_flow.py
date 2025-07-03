@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import jax
 from flax import nnx
 from flax.nnx import Rngs
 from jax import numpy as jnp
+from jax.tree_util import register_dataclass
+
 from depth.patches.extract import extract_patches_nhwc
 
 
@@ -13,6 +17,34 @@ def patches_score(patches: jax.Array) -> jax.Array:
     lam = 50.0
     patches_scores = 1 - (jnp.exp(-lam * patches_std))
     return patches_scores
+
+
+@register_dataclass
+@dataclass
+class PatchFlowEstimationParams:
+    patch1: jax.Array
+    patch2: jax.Array
+    prior: jax.Array
+
+    def check_shapes_consistent(self):
+        assert self.patch1.shape == self.patch2.shape
+        B, PH, PW, H, W, C = self.patch1.shape
+        assert self.prior.shape == (B, PH, PW, 2)
+
+
+@register_dataclass
+@dataclass
+class PatchFlowEstimation:
+    residual_flow: jax.Array
+    patch_score: jax.Array
+    match_score: jax.Array
+
+    def check_shapes_consistent_with_params(self, params: PatchFlowEstimationParams):
+        params.check_shapes_consistent()
+        B, PH, PW, F = params.prior.shape
+        assert self.residual_flow.shape == (B, PH, PW, 2)
+        assert self.match_score.shape == (B, PH, PW, 1)
+        assert self.patch_score.shape == (B, PH, PW, 1)
 
 
 class PatchFlowEstimator(nnx.Module):
@@ -62,12 +94,12 @@ class PatchFlowEstimator(nnx.Module):
             rngs=rngs,
         )
 
-    def __call__(self, patch1: jnp.ndarray, patch2: jnp.ndarray, prior: jnp.ndarray):
-        B, PH, PW, H, W, C = patch1.shape
-        patch2_score = patches_score(patch2)
+    def __call__(self, params: PatchFlowEstimationParams) -> PatchFlowEstimation:
+        B, PH, PW, H, W, C = params.patch1.shape
+        patch2_score = patches_score(params.patch2)
         BP = B * PH * PW
-        patches = jnp.stack([patch1, patch2], axis=-1).reshape(BP, H, W, C * 2)
-        flat_priors = prior.reshape(B * PH * PW, 2)
+        patches = jnp.stack([params.patch1, params.patch2], axis=-1).reshape(BP, H, W, C * 2)
+        flat_priors = params.prior.reshape(B * PH * PW, 2)
         shifted_patches = self.shift_conv(patches)
         mixed_shifts = self.mix_shifts_conv(shifted_patches)
         bn_mixed_shifts = self.bn_mix_shifts(mixed_shifts)
@@ -85,10 +117,13 @@ class PatchFlowEstimator(nnx.Module):
         output = self.mlp_output(non_linear_hidden2)
         norm_output = jax.nn.tanh(output)
         norm_output_grid = norm_output.reshape(B, PH, PW, 3)
-        norm_output_grid_with_patch_std = jnp.concatenate(
-            [norm_output_grid, patch2_score], axis=-1
+        norm_flow_grid, match_score_grid = jnp.split(norm_output_grid, (2,), axis=-1)
+        estimation = PatchFlowEstimation(
+            residual_flow=norm_flow_grid,
+            patch_score=patch2_score,
+            match_score=match_score_grid
         )
-        return norm_output_grid_with_patch_std
+        return estimation
 
 
 def test_patch_flow_estimator():
@@ -100,10 +135,13 @@ def test_patch_flow_estimator():
     patches1 = extract_patches_nhwc(frame1, patch_size=4, stride=2)
     patches2 = extract_patches_nhwc(frame2, patch_size=4, stride=2)
     priors = jnp.zeros((2, 2, 3, 2))
-    # Pass use_running_average to the __call__ method
-    flow_delta = estimator(patches1, patches2, priors)
-    B, PH, PW, F = priors.shape
-    assert flow_delta.shape == (B, PH, PW, 4)
+    params = PatchFlowEstimationParams(
+        patch1=patches1,
+        patch2=patches2,
+        prior=priors
+    )
+    estimation: PatchFlowEstimation = estimator(params)
+    estimation.check_shapes_consistent_with_params(params)
 
 
 def test_patch_flow_estimator_patch_size5():
@@ -115,7 +153,10 @@ def test_patch_flow_estimator_patch_size5():
     patches1 = extract_patches_nhwc(frame1, patch_size=5, stride=2)
     patches2 = extract_patches_nhwc(frame2, patch_size=5, stride=2)
     priors = jnp.zeros((2, 2, 3, 2))
-    # Pass use_running_average to the __call__ method
-    flow_delta = estimator(patches1, patches2, priors)
-    B, PH, PW, F = priors.shape
-    assert flow_delta.shape == (B, PH, PW, 4)
+    params = PatchFlowEstimationParams(
+        patch1=patches1,
+        patch2=patches2,
+        prior=priors
+    )
+    estimation: PatchFlowEstimation = estimator(params)
+    estimation.check_shapes_consistent_with_params(params)

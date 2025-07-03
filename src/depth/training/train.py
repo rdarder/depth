@@ -9,7 +9,8 @@ import optax
 from orbax.checkpoint import StandardCheckpointer
 from tensorboardX import SummaryWriter
 
-from depth.loss.frame_pair_pyramid_loss import frame_pair_pyramid_loss_value_and_grad
+from depth.loss.frame_pair_pyramid_loss import frame_pair_pyramid_loss_value_and_grad, \
+    LossTrace
 from depth.model.build import make_model
 from depth.train.build import generate_zero_priors
 from depth.model.pyramid_flow import PyramidFlowEstimator
@@ -23,10 +24,10 @@ def train_step(model: PyramidFlowEstimator,
                optimizer: nnx.Optimizer,
                p1: Sequence[jax.Array],
                p2: Sequence[jax.Array],
-               priors: jax.Array) -> tuple[jax.Array, Sequence[dict[str, Any]]]:
-    (loss, aux), grads = frame_pair_pyramid_loss_value_and_grad(model, p1, p2, priors)
+               priors: jax.Array) -> LossTrace:
+    (loss, loss_trace), grads = frame_pair_pyramid_loss_value_and_grad(model, p1, p2, priors)
     optimizer.update(grads)
-    return loss, aux
+    return loss_trace
 
 
 class Train:
@@ -66,12 +67,12 @@ class Train:
         for epoch in range(epochs):
             print(f"Epoch {epoch}")
             for step, (f1_jax, f2_jax) in enumerate(train_dataset):
-                loss_value, aux = train_step(self._model, self._optimizer, f1_jax, f2_jax, priors)
-                if not jnp.isfinite(loss_value):
+                trace = train_step(self._model, self._optimizer, f1_jax, f2_jax, priors)
+                if not jnp.isfinite(trace.weighted_loss):
                     print(f"Warning: NaN or Inf loss detected at step {step}. Exiting training.")
                     break
                 if global_step % 100 == 0:
-                    log_train_progress(aux, global_step, loss_value, self._logger)
+                    log_train_progress(trace, global_step, self._logger)
                 global_step += 1
 
         return global_step

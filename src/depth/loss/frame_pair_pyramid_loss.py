@@ -1,29 +1,49 @@
-from typing import Sequence, Any
+from dataclasses import dataclass
+from typing import Sequence
 
 import jax
 import jax.numpy as jnp
 from flax import nnx
+from jax.tree_util import register_dataclass
 
 from depth.loss.flow_pyramid_loss import calc_flow_pyramid_loss
-from depth.model.pyramid_flow import PyramidFlowEstimator
+from depth.model.pyramid_flow import PyramidFlowEstimator, PyramidFlowEstimationParams, \
+    PyramidFlowEstimation
+
+
+@register_dataclass
+@dataclass
+class LossTrace:
+    losses: Sequence[jax.Array]
+    flow: PyramidFlowEstimation
+    avg_level_losses: jax.Array
+    weights: jax.Array
+    weighted_loss: jax.Array
 
 
 def frame_pair_pyramid_loss(model: PyramidFlowEstimator,
                             pyramid1: Sequence[jax.Array],
                             pyramid2: Sequence[jax.Array],
-                            priors: jax.Array) -> tuple[jax.Array, Sequence[dict[str, Any]]]:
-    flow_pyramid, aux_pyramid = model(pyramid1, pyramid2, priors)
-    flow_pyramid_loss = calc_flow_pyramid_loss(flow_pyramid, aux_pyramid)
-    level_losses = jnp.array([jnp.mean(level) for level in flow_pyramid_loss])
-    weights = jnp.array([1., 0.5] + [0] * (len(level_losses) - 2))
+                            priors: jax.Array) -> tuple[jax.Array, LossTrace]:
+    pyramid_flow_params = PyramidFlowEstimationParams(
+        pyramid1=pyramid1,
+        pyramid2=pyramid2,
+        prior=priors,
+    )
+    flow = model(pyramid_flow_params)
+    level_losses = calc_flow_pyramid_loss(flow)
+    avg_level_losses = jnp.array([jnp.mean(level) for level in level_losses])
+    weights = jnp.array([1., 0.5] + [0] * (len(avg_level_losses) - 2))
     weights = weights / jnp.sum(weights)
-    weighted_loss = jnp.sum(level_losses * weights)
-    loss_aux = [
-        dict(**flow_aux, loss=loss, loss_grid=loss_grid, loss_weight=weight, flow=flow) for
-        flow, flow_aux, loss, loss_grid, weight in
-        zip(flow_pyramid, aux_pyramid, level_losses, flow_pyramid_loss, weights)
-    ]
-    return weighted_loss, loss_aux
+    weighted_loss = jnp.sum(avg_level_losses * weights)
+    loss_trace = LossTrace(
+        losses=level_losses,
+        flow=flow,
+        avg_level_losses=avg_level_losses,
+        weights=weights,
+        weighted_loss=weighted_loss,
+    )
+    return weighted_loss, loss_trace
 
 
 frame_pair_pyramid_loss_value_and_grad = nnx.value_and_grad(frame_pair_pyramid_loss, has_aux=True)

@@ -1,26 +1,30 @@
+from dataclasses import dataclass
 from importlib import resources
 from typing import Sequence
 
 import jax
 import jax.numpy as jnp
 from flax import nnx
+from jax.tree_util import register_dataclass
 
 from depth.images.load import load_frame_from_path
 from depth.images.pyramid import build_image_pyramid
 from depth.images.separable_convolution import conv_output_size
-from depth.model.pyramid_flow import PyramidFlowEstimator
+from depth.loss.flow_loss import patch_flow_loss_grid
+from depth.model.pyramid_flow import PyramidFlowEstimator, PyramidFlowEstimation, \
+    PyramidFlowEstimationParams
 from depth.model.patch_flow import PatchFlowEstimator
 from depth.model.single_level_flow import LevelFlowEstimator
-from depth.loss.flow_loss import calc_flow_loss
+from depth.model.upsample import FlowUpsampler
 
 
-def calc_flow_pyramid_loss(flow_pyramid: Sequence[jax.Array], aux_pyramid: Sequence[dict]) -> (
-        Sequence[jax.Array]):
+
+def calc_flow_pyramid_loss(flow: PyramidFlowEstimation) -> Sequence[jax.Array]:
     losses = []
-    for flow_with_scores, aux in zip(reversed(flow_pyramid), reversed(aux_pyramid)):
-        loss = calc_flow_loss(flow_with_scores, aux)
+    for level in flow.pyramid:
+        loss = patch_flow_loss_grid(level)
         losses.append(loss)
-    return losses[::-1]
+    return losses
 
 
 def check_prior_shape(coarsest_grained_frame: jax.Array, prior: jax.Array, patch_size: int,
@@ -47,14 +51,18 @@ def test_pyramid_loss():
         patch_size=4, num_channels=1, train=False, rngs=rngs
     )
     level_flow_estimator = LevelFlowEstimator(stride=2, flow_estimator=patch_flow_estimator)
-    pyramid_flow_estimator = PyramidFlowEstimator(level_flow_estimator)
+    upsampler = FlowUpsampler(rngs=rngs)
+    pyramid_flow_estimator = PyramidFlowEstimator(
+        level_flow_estimator=level_flow_estimator, upsampler=upsampler
+    )
     pyramid1 = build_image_pyramid(batch1, levels=5, keep=5)
     pyramid2 = build_image_pyramid(batch2, levels=5, keep=5)
     prior = jnp.zeros((2, 3, 3, 2), jnp.float32)
-    flow_pyramid, aux_pyramid = pyramid_flow_estimator(pyramid1, pyramid2, prior)
-    loss_pyramid = calc_flow_pyramid_loss(flow_pyramid, aux_pyramid)
-    assert loss_pyramid[-1].shape == (2, 3, 3)
-    assert loss_pyramid[-2].shape == (2, 8, 8)
-    assert loss_pyramid[-3].shape == (2, 18, 18)
-    assert loss_pyramid[-4].shape == (2, 38, 38)
-    assert loss_pyramid[-5].shape == (2, 78, 78)
+    params = PyramidFlowEstimationParams(pyramid1=pyramid1, pyramid2=pyramid2, prior=prior)
+    flow = pyramid_flow_estimator(params)
+    losses = calc_flow_pyramid_loss(flow)
+    assert losses[-1].shape == (2, 3, 3)
+    assert losses[-2].shape == (2, 8, 8)
+    assert losses[-3].shape == (2, 18, 18)
+    assert losses[-4].shape == (2, 38, 38)
+    assert losses[-5].shape == (2, 78, 78)

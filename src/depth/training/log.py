@@ -12,7 +12,7 @@ from tensorboardX import SummaryWriter
 from depth.images.load import load_frame_from_path
 from depth.images.pyramid import build_image_pyramid
 from depth.images.upscale import upscale_size_2n_plus_2
-from depth.loss.frame_pair_pyramid_loss import frame_pair_pyramid_loss
+from depth.loss.frame_pair_pyramid_loss import frame_pair_pyramid_loss, LossTrace
 from depth.model.build import make_model
 from depth.model.patch_flow import PatchFlowEstimator
 from depth.train.build import generate_zero_priors
@@ -35,8 +35,8 @@ def max_expected_flow(inv_level: int):
         return 0.5 + 2 * max_expected_flow(inv_level - 1)
 
 
-def build_image_grid(aux_pyramid: Sequence[dict]) -> Figure:
-    rows = len(aux_pyramid)
+def build_image_grid(trace: LossTrace) -> Figure:
+    rows = len(trace.flow.pyramid)
     cols = 8
     fig, axs = plt.subplots(rows, cols, figsize=(2 * cols, 2 * rows))
     column_titles = ['Frame1', 'Reflowed-F2->F1', 'Frame2', 'frame-diff', 'reflow-diff',
@@ -46,11 +46,11 @@ def build_image_grid(aux_pyramid: Sequence[dict]) -> Figure:
     for i, ax in enumerate(axs[0]):
         ax.set_title(column_titles[i], fontsize=14, pad=10)  # Set title for top subplot in column
 
-    for i, (aux, ax) in enumerate(zip(aux_pyramid, axs)):
-        f1 = aux['frame1'][0]
-        f2 = aux['frame2'][0]
-        flow = aux['flow'][0]
-        loss = aux['loss_grid'][0]
+    for i, ax in enumerate(axs):
+        f1 = trace.flow.pyramid[i].frame1[0]
+        f2 = trace.flow.pyramid[i].frame2[0]
+        flow = trace.flow.pyramid[i].net_flow[0]
+        loss = trace.losses[i][0]
         ax[0].imshow(f1, cmap="grey", vmin=0, vmax=1)
         reflowed_img2 = apply_flow_entire_image(f2, flow)
         ax[1].imshow(reflowed_img2, cmap="grey", vmin=0, vmax=1)
@@ -67,8 +67,8 @@ def build_image_grid(aux_pyramid: Sequence[dict]) -> Figure:
     return fig
 
 
-def log_flow_grid(aux_pyramid: Sequence[dict], writer: SummaryWriter, step: int):
-    fig = build_image_grid(aux_pyramid)
+def log_flow_grid(trace: LossTrace, writer: SummaryWriter, step: int):
+    fig = build_image_grid(trace)
     fig.canvas.draw()
     img = np.array(fig.canvas.renderer.buffer_rgba())
     plt.close(fig)
@@ -99,24 +99,20 @@ def fmt_float(f: float) -> str:
     return f"{f:.5f}"
 
 
-def log_train_progress(
-        aux_pyramid: Sequence[dict],
-        global_step,
-        loss_value,
-        writer
-):
+def log_train_progress(trace: LossTrace, global_step, writer):
     # coarse_to_fine_losses = reversed(aux['levels_losses'])
-    for i, level_aux in enumerate(reversed(aux_pyramid)):
-        writer.add_scalar(f"level_loss/{i}", level_aux['loss'], global_step)
-    writer.add_scalar("train_loss", loss_value, global_step)
-    log_flow_grid(aux_pyramid, writer, global_step)
-    level_losses = ' '.join([fmt_float(level['loss'].item()) for level in reversed(aux_pyramid)])
-    level_weights = ' '.join([fmt_float(level['loss_weight'].item()) for level in reversed(
-        aux_pyramid)])
+    for i, level_loss in enumerate(reversed(trace.avg_level_losses)):
+        writer.add_scalar(f"level_loss/{i}", level_loss, global_step)
+    writer.add_scalar("train_loss", trace.weighted_loss, global_step)
+    log_flow_grid(trace, writer, global_step)
+    level_losses = ' '.join([fmt_float(level_loss.item())
+                             for level_loss in reversed(trace.avg_level_losses)])
+    level_weights = ' '.join([fmt_float(level_weight.item())
+                              for level_weight in reversed(trace.weights)])
 
     print(
         f"Step {global_step:06}\n"
-        f"    Weighted Loss:\t{fmt_float(loss_value)}\n"
+        f"    Weighted Loss:\t{fmt_float(trace.weighted_loss.item())}\n"
         f"    Levels losses:\t{level_losses}\n"
         f"    Levels weights:\t{level_weights}\n"
     )

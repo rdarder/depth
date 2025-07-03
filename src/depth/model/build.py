@@ -4,7 +4,7 @@ from depth.model.pyramid_flow import PyramidFlowEstimator
 from depth.model.patch_flow import PatchFlowEstimator
 from depth.model.settings import ModelSettings
 from depth.model.single_level_flow import LevelFlowEstimator
-from depth.model.upscale import FlowUpscaler
+from depth.model.upsample import FlowUpsampler
 
 
 def make_model(seed: int, train: bool, settings: ModelSettings) -> PyramidFlowEstimator:
@@ -17,8 +17,8 @@ def make_model(seed: int, train: bool, settings: ModelSettings) -> PyramidFlowEs
     )
     level_flow_estimator = LevelFlowEstimator(stride=settings.patch_stride,
                                               flow_estimator=patch_flow_estimator)
-    upscaler = FlowUpscaler(rngs=rngs)
-    pyramid_flow_estimator = PyramidFlowEstimator(level_flow_estimator, upscaler=upscaler)
+    upsampler = FlowUpsampler(rngs=rngs)
+    pyramid_flow_estimator = PyramidFlowEstimator(level_flow_estimator, upsampler=upsampler)
     return pyramid_flow_estimator
 
 
