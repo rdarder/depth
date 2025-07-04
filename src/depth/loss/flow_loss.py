@@ -2,14 +2,16 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 
+from depth.jax_utils import print_shapes
 from depth.model.patch_flow import PatchFlowEstimator
 from depth.model.single_level_flow import LevelFlowEstimation, LevelFlowEstimationParams
 from depth.model.single_level_flow import LevelFlowEstimator
 from depth.patches.loss import patch_flow_loss
 
 
-def patch_match_score_loss(l_patch, l_mid, l=2.0):
-    return 1 / (1 + jnp.exp(l * (l_patch - l_mid) / (l_mid + 1e-6)))
+def patch_match_score_loss(score: jax.Array, patch_loss: jax.Array):
+    assert score.shape == patch_loss.shape
+    return (score - patch_loss) ** 2
 
 
 def patch_flow_loss_grid(flow: LevelFlowEstimation) -> jax.Array:
@@ -24,8 +26,8 @@ def patch_flow_loss_grid(flow: LevelFlowEstimation) -> jax.Array:
     flat_patches2 = flow.patches2.reshape(-1, PH, PW, C)
     flat_flow = flow.net_flow.reshape(-1, 2)
     flat_losses = jax.vmap(patch_flow_loss)(flat_patches1, flat_patches2, flat_flow)
-    mean_loss = jnp.mean(flat_losses, axis=-1)
-    match_score_loss = patch_match_score_loss(flat_losses, mean_loss)
+    match_scores_flat = flow.match_score.reshape(-1)
+    match_score_loss = patch_match_score_loss(match_scores_flat, flat_losses)
     compound_loss = 1.0 * flat_losses + 0.02 * match_score_loss
     return compound_loss.reshape(B, PY, PX)
 
