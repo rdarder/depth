@@ -1,17 +1,20 @@
 from importlib import resources
+from pathlib import Path
 from typing import Sequence
 
 import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
+import treescope
+from flax import nnx
 from jax.scipy.ndimage import map_coordinates
 from matplotlib.figure import Figure
 from tensorboardX import SummaryWriter
 
 from depth.images.load import load_frame_from_path
 from depth.images.pyramid import build_image_pyramid
-from depth.images.upscale import upscale_size_2n_plus_2
+from depth.images.upscale import upsample_2n_plus2
 from depth.loss.frame_pair_pyramid_loss import frame_pair_pyramid_loss, LossTrace
 from depth.model.build import make_model
 from depth.model.patch_flow import PatchFlowEstimator
@@ -20,7 +23,7 @@ from depth.model.settings import ModelSettings
 
 
 def apply_flow_entire_image(img: jax.Array, flow: jax.Array) -> jax.Array:
-    flow = upscale_size_2n_plus_2(flow[None, :, :, :])[0]
+    flow = upsample_2n_plus2(flow[None, :, :, :])[0]
     flow_y = flow[:, :, 0]
     flow_x = flow[:, :, 1]
     H, W = flow_y.shape
@@ -99,7 +102,7 @@ def fmt_float(f: float) -> str:
     return f"{f:.5f}"
 
 
-def log_train_progress(trace: LossTrace, global_step, writer):
+def log_train_progress(model: nnx.Module, trace: LossTrace, global_step, writer, log_path: Path):
     # coarse_to_fine_losses = reversed(aux['levels_losses'])
     for i, level_loss in enumerate(reversed(trace.avg_level_losses)):
         writer.add_scalar(f"level_loss/{i}", level_loss, global_step)
@@ -110,12 +113,23 @@ def log_train_progress(trace: LossTrace, global_step, writer):
     level_weights = ' '.join([fmt_float(level_weight.item())
                               for level_weight in reversed(trace.weights)])
 
+    log_state(model, log_path)
+
     print(
         f"Step {global_step:06}\n"
         f"    Weighted Loss:\t{fmt_float(trace.weighted_loss.item())}\n"
         f"    Levels losses:\t{level_losses}\n"
         f"    Levels weights:\t{level_weights}\n"
     )
+
+
+def log_state(model: nnx.Module, log_path: Path):
+    _, state = nnx.split(model)
+    with treescope.active_autovisualizer.set_scoped(treescope.ArrayAutovisualizer()):
+        contents = treescope.render_to_html(state)
+
+    with open(log_path / "model_state.html", "w") as f:
+        f.write(contents)
 
 
 def visualize_shift_conv_weights(model: PatchFlowEstimator) -> np.ndarray:

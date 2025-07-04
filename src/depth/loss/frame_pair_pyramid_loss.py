@@ -33,7 +33,7 @@ def frame_pair_pyramid_loss(model: PyramidFlowEstimator,
     flow = model(pyramid_flow_params)
     level_losses = calc_flow_pyramid_loss(flow)
     avg_level_losses = jnp.array([jnp.mean(level) for level in level_losses])
-    weights = jnp.array([1., 0.5] + [0] * (len(avg_level_losses) - 2))
+    weights = 1 / jnp.array([2**i for i in range(len(avg_level_losses))])
     weights = weights / jnp.sum(weights)
     weighted_loss = jnp.sum(avg_level_losses * weights)
     loss_trace = LossTrace(

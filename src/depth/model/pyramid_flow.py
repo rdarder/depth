@@ -10,6 +10,7 @@ from jax.tree_util import register_dataclass
 from depth.images.load import load_frame_from_path
 from depth.images.pyramid import build_image_pyramid
 from depth.images.separable_convolution import conv_output_size
+from depth.images.upscale import upsample_2n_plus2, upscale_values_2n_plus2
 from depth.model.patch_flow import PatchFlowEstimator
 from depth.model.single_level_flow import LevelFlowEstimator, LevelFlowEstimationParams, \
     LevelFlowEstimation

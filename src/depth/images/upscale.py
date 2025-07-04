@@ -24,7 +24,7 @@ def build_gaussian_1d_vector(size: int, sigma: float) -> jax.Array:
     return gaussian_1d / jnp.sum(gaussian_1d)
 
 
-def upscale_size_2n_plus_2(flow: jax.Array) -> jax.Array:
+def upsample_2n_plus2(flow: jax.Array) -> jax.Array:
     """Upscales images of shape (B, H, W, C) to (B, 2*H+2, 2W+2, C) and smooths it afterwards."""
     extended_upscaled_flow = flow.repeat(2, axis=1).repeat(2, axis=2)
     extended_padded_upscaled_flow = jnp.pad(
@@ -37,7 +37,7 @@ def upscale_size_2n_plus_2(flow: jax.Array) -> jax.Array:
 
 def test_upscale_flow():
     sample_flow = jnp.arange(16).reshape(2, 2, 2, 2).astype(jnp.float32)
-    upscaled = upscale_size_2n_plus_2(sample_flow)
+    upscaled = upsample_2n_plus2(sample_flow)
     print(sample_flow[1, :, :, 1])
     print(upscaled[1, :, :, 1])
     assert upscaled.shape == (2, 6, 6, 2)

@@ -24,10 +24,21 @@ def train_step(model: PyramidFlowEstimator,
                optimizer: nnx.Optimizer,
                p1: Sequence[jax.Array],
                p2: Sequence[jax.Array],
-               priors: jax.Array) -> LossTrace:
-    (loss, loss_trace), grads = frame_pair_pyramid_loss_value_and_grad(model, p1, p2, priors)
+               priors: jax.Array) -> jax.Array:
+    (loss, _), grads = frame_pair_pyramid_loss_value_and_grad(model, p1, p2, priors)
     optimizer.update(grads)
-    return loss_trace
+    return loss
+
+
+@nnx.jit
+def trace_step(model: PyramidFlowEstimator,
+               optimizer: nnx.Optimizer,
+               p1: Sequence[jax.Array],
+               p2: Sequence[jax.Array],
+               priors: jax.Array) -> LossTrace:
+    (loss, trace), grads = frame_pair_pyramid_loss_value_and_grad(model, p1, p2, priors)
+    optimizer.update(grads)
+    return trace
 
 
 class Train:
@@ -35,8 +46,12 @@ class Train:
         self._settings = settings
         self._run_id = datetime.now().strftime("%Y%m%d-%H%M%S")
         self._checkpointer = StandardCheckpointer()
-        log_path = os.path.join(self._settings.train.tensorboard_logs, self._run_id)
-        self._logger = SummaryWriter(log_path)
+        self._log_path = self._settings.train.tensorboard_logs / self._run_id
+        self._log_path.mkdir(exist_ok=True)
+        symlink_path = settings.train.tensorboard_logs / "latest"
+        symlink_path.unlink(missing_ok=True)
+        symlink_path.symlink_to(self._run_id, target_is_directory=True)
+        self._logger = SummaryWriter(str(self._log_path))
         print("Initializing model and optimizer...")
         self._model = make_model(0, train=True, settings=self._settings.model)
         transformations = optax.chain(
@@ -50,31 +65,32 @@ class Train:
         print("Starting main training loop...")
         global_step = 0
         epochs = self._settings.train.num_epochs
-        for stage in range(self._settings.model.levels - 1):
-            global_step = self.single_level_train_loop(stage, global_step, epochs)
-            epochs = epochs + 2
-            self._save_checkpoint(f"{stage}-final")
+        for levels in range(2, self._settings.model.levels + 1):
+            global_step = self.single_level_train_loop(levels, global_step, epochs)
+            epochs = 2 * epochs
+            self._save_checkpoint(f"{levels}-final")
         print("Training finished.")
         self._logger.close()
         self._save_checkpoint(f"final")
 
-    def single_level_train_loop(self, stage: int, global_step: int, epochs: int) -> int:
-        keep_levels = stage + 2
-        train_dataset = make_frame_pyramids_dataset(self._settings, levels=keep_levels)
+    def single_level_train_loop(self, levels: int, global_step: int, epochs: int) -> int:
+        train_dataset = make_frame_pyramids_dataset(self._settings, levels=levels)
         priors = generate_zero_priors(self._settings.train.batch_size, self._settings.model)
-        print(f"Starting stage {stage} training loop, using {keep_levels} pyramid levels.")
+        print(f"Training with  {levels} pyramid levels.")
         print(f"{len(train_dataset)} frame pairs on {self._settings.train.batch_size} size batches "
               f"over {self._settings.train.num_epochs} epochs")
 
         for epoch in range(epochs):
             print(f"Epoch {epoch}")
             for step, (f1_jax, f2_jax) in enumerate(train_dataset):
-                trace = train_step(self._model, self._optimizer, f1_jax, f2_jax, priors)
-                if not jnp.isfinite(trace.weighted_loss):
+                loss = train_step(self._model, self._optimizer, f1_jax, f2_jax, priors)
+                if not jnp.isfinite(loss):
                     print(f"Warning: NaN or Inf loss detected at step {step}. Exiting training.")
                     return
                 if global_step % 100 == 0:
-                    log_train_progress(trace, global_step, self._logger)
+                    trace = trace_step(self._model, self._optimizer, f1_jax, f2_jax, priors)
+                    log_train_progress(self._model, trace, global_step, self._logger,
+                                       self._log_path)
                 global_step += 1
 
         return global_step

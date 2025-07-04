@@ -1,11 +1,9 @@
-from dataclasses import dataclass
 from importlib import resources
 from typing import Sequence
 
 import jax
 import jax.numpy as jnp
 from flax import nnx
-from jax.tree_util import register_dataclass
 
 from depth.images.load import load_frame_from_path
 from depth.images.pyramid import build_image_pyramid

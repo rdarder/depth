@@ -1,8 +1,6 @@
 import jax
-import jax.numpy as jnp
 from flax import nnx
 
-from depth.jax_utils import print_shapes
 from depth.model.patch_flow import PatchFlowEstimator
 from depth.model.single_level_flow import LevelFlowEstimation, LevelFlowEstimationParams
 from depth.model.single_level_flow import LevelFlowEstimator
@@ -28,7 +26,7 @@ def patch_flow_loss_grid(flow: LevelFlowEstimation) -> jax.Array:
     flat_losses = jax.vmap(patch_flow_loss)(flat_patches1, flat_patches2, flat_flow)
     match_scores_flat = flow.match_score.reshape(-1)
     match_score_loss = patch_match_score_loss(match_scores_flat, flat_losses)
-    compound_loss = 1.0 * flat_losses + 0.02 * match_score_loss
+    compound_loss = 1.0 * flat_losses + 0.1 * match_score_loss
     return compound_loss.reshape(B, PY, PX)
 
 
