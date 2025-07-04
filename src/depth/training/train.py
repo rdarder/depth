@@ -39,10 +39,12 @@ class Train:
         self._logger = SummaryWriter(log_path)
         print("Initializing model and optimizer...")
         self._model = make_model(0, train=True, settings=self._settings.model)
-        self._optimizer = nnx.Optimizer(self._model, optax.chain(
+        transformations = optax.chain(
             optax.clip_by_global_norm(1.0),
-            optax.adam(learning_rate=self._settings.train.learning_rate)
-        ))
+            optax.adam(learning_rate=self._settings.train.learning_rate),
+            optax.masked(optax.keep_params_nonnegative(), self._build_spatial_conv_mask()),
+        )
+        self._optimizer = nnx.Optimizer(self._model, transformations)
 
     def run(self):
         print("Starting main training loop...")
@@ -70,7 +72,7 @@ class Train:
                 trace = train_step(self._model, self._optimizer, f1_jax, f2_jax, priors)
                 if not jnp.isfinite(trace.weighted_loss):
                     print(f"Warning: NaN or Inf loss detected at step {step}. Exiting training.")
-                    break
+                    return
                 if global_step % 100 == 0:
                     log_train_progress(trace, global_step, self._logger)
                 global_step += 1
@@ -84,6 +86,18 @@ class Train:
         self._checkpointer.save(checkpoint_dir / tag, model_state)
         self._checkpointer.wait_until_finished()
         print(f"Saved checkpoint: {self._run_id}/{tag}.")
+
+    def _build_spatial_conv_mask(self):
+        _, state, _ = nnx.split(self._model, nnx.Param, ...)
+
+        def mask_fn(path, s) -> bool:
+            return path == ('_upsampler', 'spatial_influence_conv', 'kernel')
+
+        mapped_state = nnx.map_state(mask_fn, state)
+        # ensure we matched at least one time. else we probably renamed the model's convolution.
+        assert any([s[1] for s in nnx.to_flat_state(mapped_state)])
+
+        return mapped_state
 
 
 def run():

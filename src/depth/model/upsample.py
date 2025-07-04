@@ -82,7 +82,6 @@ class FlowUpsampler(nnx.Module):
             effective_flow,  # B H W (00 01 10 11) (yx)
             'b h w (p_h p_w) f -> b (h p_h) (w p_w) f', p_h=2, p_w=2
         )
-        print_shapes(effective_flow=effective_flow, upsampled_flow=upsampled_flow)
         padded_upsampled_flow = jnp.pad(
             upsampled_flow,
             pad_width=((0, 0), (1, 1), (1, 1), (0, 0)),
