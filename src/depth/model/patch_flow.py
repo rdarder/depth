@@ -64,14 +64,14 @@ class PatchFlowEstimator(nnx.Module):
         )
         self.mix_shifts_conv = nnx.Conv(
             in_features=8 * num_channels,
-            out_features=29,
+            out_features=30,
             kernel_size=(1, 1),
             strides=(1, 1),
             padding='VALID',
             rngs=rngs,
             use_bias=False,
         )
-        self.bn_mix_shifts = nnx.BatchNorm(num_features=29, use_running_average=not train,
+        self.bn_mix_shifts = nnx.BatchNorm(num_features=30, use_running_average=not train,
                                            rngs=rngs)
         self.mlp_hidden = nnx.Linear(
             in_features=32,
@@ -96,7 +96,6 @@ class PatchFlowEstimator(nnx.Module):
 
     def __call__(self, params: PatchFlowEstimationParams) -> PatchFlowEstimation:
         B, PH, PW, H, W, C = params.patch1.shape
-        patch2_score = patches_score(params.patch2)
         BP = B * PH * PW
         patches = jnp.stack([params.patch1, params.patch2], axis=-1).reshape(BP, H, W, C * 2)
         flat_priors = params.prior.reshape(B * PH * PW, 2)
@@ -104,9 +103,8 @@ class PatchFlowEstimator(nnx.Module):
         mixed_shifts = self.mix_shifts_conv(shifted_patches)
         bn_mixed_shifts = self.bn_mix_shifts(mixed_shifts)
         avg_abs_mixed_shifts = jnp.mean(jnp.abs(bn_mixed_shifts), axis=(1, 2)).reshape(BP, -1)
-        patch2_std_flat = patch2_score.reshape(B * PH * PW, 1)
         avg_shifts_priors_and_std = jnp.concatenate(
-            [avg_abs_mixed_shifts, flat_priors, patch2_std_flat],
+            [avg_abs_mixed_shifts, flat_priors],
             axis=-1)
         hidden_state = self.mlp_hidden(avg_shifts_priors_and_std)
         bn_hidden_state = self.bn_hidden1(hidden_state)
@@ -118,6 +116,7 @@ class PatchFlowEstimator(nnx.Module):
         norm_output = jax.nn.tanh(output)
         norm_output_grid = norm_output.reshape(B, PH, PW, 3)
         norm_flow_grid, match_score_grid = jnp.split(norm_output_grid, (2,), axis=-1)
+        patch2_score = patches_score(params.patch2)
         estimation = PatchFlowEstimation(
             residual_flow=norm_flow_grid,
             patch_score=patch2_score,
