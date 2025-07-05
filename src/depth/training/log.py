@@ -1,34 +1,26 @@
 from importlib import resources
 from pathlib import Path
-from typing import Sequence
 
-import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
 import treescope
 from flax import nnx
-from jax.scipy.ndimage import map_coordinates
+from jaxtyping import PyTree
 from matplotlib.figure import Figure
 from tensorboardX import SummaryWriter
 
+from depth.images.flow import apply_flow_entire_image, apply_flow_multi_channel_image
 from depth.images.load import load_frame_from_path
 from depth.images.pyramid import build_image_pyramid
-from depth.images.upscale import upsample_2n_plus2
-from depth.loss.frame_pair_pyramid_loss import frame_pair_pyramid_loss, LossTrace
+from depth.images.upscale import upsample_2n_plus2, upscale_values_2n_plus2
+from depth.jax_utils import print_shapes
+from depth.loss.frame_pair_pyramid_loss import pyramid_loss, LossTrace
 from depth.model.build import make_model
 from depth.model.patch_flow import PatchFlowEstimator
+from depth.model.pyramid_flow import PyramidFlowEstimationParams
 from depth.train.build import generate_zero_priors
 from depth.model.settings import ModelSettings
-
-
-def apply_flow_entire_image(img: jax.Array, flow: jax.Array) -> jax.Array:
-    flow = upsample_2n_plus2(flow[None, :, :, :])[0]
-    flow_y = flow[:, :, 0]
-    flow_x = flow[:, :, 1]
-    H, W = flow_y.shape
-    grid_y, grid_x = jnp.meshgrid(jnp.arange(H), jnp.arange(W), indexing='ij')
-    return map_coordinates(img.squeeze(-1), [grid_y + flow_y, grid_x + flow_x], order=1)
 
 
 def max_expected_flow(inv_level: int):
@@ -52,18 +44,20 @@ def build_image_grid(trace: LossTrace) -> Figure:
     for i, ax in enumerate(axs):
         f1 = trace.flow.pyramid[i].frame1[0]
         f2 = trace.flow.pyramid[i].frame2[0]
-        flow = trace.flow.pyramid[i].net_flow[0]
-        loss = trace.losses[i][0]
+        flow = trace.flow.pyramid[i].net_flow[:1]
+        upscaled_flow = upscale_values_2n_plus2(upsample_2n_plus2(flow))[0]
+        loss = trace.level_losses[i].trace.patch_loss[0]
+        reflowed_img2 = apply_flow_multi_channel_image(f2, upscaled_flow)[:, :, 0]
+
         ax[0].imshow(f1, cmap="grey", vmin=0, vmax=1)
-        reflowed_img2 = apply_flow_entire_image(f2, flow)
         ax[1].imshow(reflowed_img2, cmap="grey", vmin=0, vmax=1)
         ax[2].imshow(f2, cmap="grey", vmin=0, vmax=1)
         ax[3].imshow(f2 - f1, cmap="coolwarm", vmin=-0.1, vmax=0.1)
         ax[4].imshow(reflowed_img2[:, :, None] - f1, cmap="coolwarm", vmin=-0.1, vmax=0.1)
         ax[5].imshow(loss, cmap="grey", vmin=0, vmax=0.1)
         flow_max = max_expected_flow(rows - i - 1)
-        ax[6].imshow(flow[:, :, 1:2], cmap="coolwarm", vmin=-flow_max, vmax=flow_max)
-        ax[7].imshow(flow[:, :, 0:1], cmap="coolwarm", vmin=-flow_max, vmax=flow_max)
+        ax[6].imshow(flow[0, :, :, 1:2], cmap="coolwarm", vmin=-flow_max, vmax=flow_max)
+        ax[7].imshow(flow[0, :, :, 0:1], cmap="coolwarm", vmin=-flow_max, vmax=flow_max)
         for axc in ax:
             axc.set_axis_off()
     plt.tight_layout()
@@ -89,8 +83,16 @@ def plot_inference_grid():
     pyramid1 = build_image_pyramid(frame1[None, :, :, :], levels=levels, keep=levels)
     pyramid2 = build_image_pyramid(frame2[None, :, :, :], levels=levels, keep=levels)
     priors = generate_zero_priors(1, settings)
-    _, aux_pyramid = frame_pair_pyramid_loss(model, pyramid1, pyramid2, priors)
-    build_image_grid(aux_pyramid)
+    confidence = jnp.zeros_like(priors)[:, :, :, :1]
+    pyramid_estimation_params = PyramidFlowEstimationParams(
+        pyramid1=pyramid1,
+        pyramid2=pyramid2,
+        prior=priors,
+        confidence=confidence
+    )
+    flow = model(pyramid_estimation_params)
+    trace = pyramid_loss(flow)
+    build_image_grid(trace)
     plt.show()
 
 
@@ -102,18 +104,16 @@ def fmt_float(f: float) -> str:
     return f"{f:.5f}"
 
 
-def log_train_progress(model: nnx.Module, trace: LossTrace, global_step, writer, log_path: Path):
+def log_train_progress(trace: LossTrace, global_step, writer):
     # coarse_to_fine_losses = reversed(aux['levels_losses'])
-    for i, level_loss in enumerate(reversed(trace.avg_level_losses)):
+    for i, level_loss in enumerate(reversed(trace.weighted_level_losses)):
         writer.add_scalar(f"level_loss/{i}", level_loss, global_step)
     writer.add_scalar("train_loss", trace.weighted_loss, global_step)
     log_flow_grid(trace, writer, global_step)
     level_losses = ' '.join([fmt_float(level_loss.item())
-                             for level_loss in reversed(trace.avg_level_losses)])
+                             for level_loss in reversed(trace.weighted_level_losses)])
     level_weights = ' '.join([fmt_float(level_weight.item())
                               for level_weight in reversed(trace.weights)])
-
-    log_state(model, log_path)
 
     print(
         f"Step {global_step:06}\n"
@@ -123,12 +123,20 @@ def log_train_progress(model: nnx.Module, trace: LossTrace, global_step, writer,
     )
 
 
-def log_state(model: nnx.Module, log_path: Path):
+def log_model_state(model: nnx.Module, log_path: Path):
     _, state = nnx.split(model)
     with treescope.active_autovisualizer.set_scoped(treescope.ArrayAutovisualizer()):
         contents = treescope.render_to_html(state)
 
     with open(log_path / "model_state.html", "w") as f:
+        f.write(contents)
+
+
+def log_grads(grads: PyTree, log_path: Path):
+    with treescope.active_autovisualizer.set_scoped(treescope.ArrayAutovisualizer()):
+        contents = treescope.render_to_html(grads)
+
+    with open(log_path / "grads.html", "w") as f:
         f.write(contents)
 
 

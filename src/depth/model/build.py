@@ -15,10 +15,11 @@ def make_model(seed: int, train: bool, settings: ModelSettings) -> PyramidFlowEs
         train=train,
         rngs=rngs
     )
-    level_flow_estimator = LevelFlowEstimator(stride=settings.patch_stride,
-                                              flow_estimator=patch_flow_estimator)
     upsampler = FlowUpsampler(rngs=rngs)
-    pyramid_flow_estimator = PyramidFlowEstimator(level_flow_estimator, upsampler=upsampler)
+    level_flow_estimator = LevelFlowEstimator(
+        stride=settings.patch_stride,
+        flow_estimator=patch_flow_estimator,
+        upsampler=upsampler
+    )
+    pyramid_flow_estimator = PyramidFlowEstimator(level_flow_estimator)
     return pyramid_flow_estimator
-
-

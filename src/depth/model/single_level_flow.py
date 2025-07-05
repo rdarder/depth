@@ -10,6 +10,7 @@ from jax.tree_util import register_dataclass
 from depth.images.separable_convolution import conv_output_size
 from depth.model.patch_flow import PatchFlowEstimator, PatchFlowEstimationParams, \
     PatchFlowEstimation
+from depth.model.upsample import FlowUpsampler, UpsampledFlow, FlowUpsamplerParams
 from depth.patches.extract import extract_patches_nhwc
 from depth.patches.extract_shifted import (batch_extract_shifted_patches_nchw,
                                            batch_flow_lands_within_frame)
@@ -21,6 +22,7 @@ class LevelFlowEstimationParams:
     frame1: jax.Array
     frame2: jax.Array
     prior: jax.Array
+    confidence: jax.Array
 
     def check_shapes_consistent(self, patch_size: int, stride: int):
         assert self.frame1.shape == self.frame2.shape
@@ -44,6 +46,7 @@ class LevelFlowEstimation:
     patch_score: jax.Array
     residual_flow: jax.Array
     net_flow: jax.Array
+    upsampled_flow: UpsampledFlow
 
     def check_shapes_consistent(self):
         assert self.frame1.shape == self.frame2.shape
@@ -52,10 +55,12 @@ class LevelFlowEstimation:
         assert self.valid_patches.dtype == jnp.bool
         assert self.valid_patches.shape == (B, PY, PX)
         assert self.patches2.shape == self.patches1.shape
+        assert self.patches1.shape[:3] == (B, PY, PX)
         assert self.match_score.shape == (B, PY, PX, 1)
         assert self.patch_score.shape == (B, PY, PX, 1)
         assert self.residual_flow.shape == (B, PY, PX, 2)
         assert self.net_flow.shape == (B, PY, PX, 2)
+        self.upsampled_flow.check_shapes_consistent()
 
     def check_shapes_consistent_with_params(self, params: LevelFlowEstimationParams, patch_size:
     int, stride: int):
@@ -76,8 +81,9 @@ class LevelFlowEstimation:
 
 
 class LevelFlowEstimator(nnx.Module):
-    def __init__(self, stride: int, flow_estimator: PatchFlowEstimator):
+    def __init__(self, stride: int, flow_estimator: PatchFlowEstimator, upsampler: FlowUpsampler):
         self._flow_estimator = flow_estimator
+        self._upsampler = upsampler
         self.patch_size = flow_estimator.patch_size
         self.stride = stride
 
@@ -108,6 +114,15 @@ class LevelFlowEstimator(nnx.Module):
         )
 
         estimation: PatchFlowEstimation = self._flow_estimator(patch_params)
+        net_flow = params.prior + estimation.residual_flow
+        upsample_params = FlowUpsamplerParams(
+            residual_flow=estimation.residual_flow,
+            net_flow=net_flow,
+            confidence=params.confidence,
+            match_score=estimation.match_score,
+            patch_score=estimation.patch_score,
+        )
+        upsampled: UpsampledFlow = self._upsampler(upsample_params)
 
         level_estimation = LevelFlowEstimation(
             frame1=params.frame1,
@@ -119,6 +134,7 @@ class LevelFlowEstimator(nnx.Module):
             patch_score=estimation.patch_score,
             residual_flow=estimation.residual_flow,
             net_flow=params.prior + estimation.residual_flow,
+            upsampled_flow=upsampled
         )
         return level_estimation
 
@@ -129,15 +145,20 @@ def test_single_level_flow_estimator():
     patch_flow_estimator = PatchFlowEstimator(
         patch_size=4, num_channels=2, train=False, rngs=rngs
     )
-    level_flow_estimator = LevelFlowEstimator(stride=2, flow_estimator=patch_flow_estimator)
+    upsampler = FlowUpsampler(rngs=rngs)
+    level_flow_estimator = LevelFlowEstimator(stride=2, flow_estimator=patch_flow_estimator,
+                                              upsampler=upsampler)
 
     patches_y = conv_output_size(6, 4, 2)
     patches_x = conv_output_size(8, 4, 2)
     prior = jax.random.uniform(jax.random.key(2), (3, patches_y, patches_x, 2))
+    confidence = jax.random.uniform(jax.random.key(3), (3, patches_y, patches_x, 1))
+
     params = LevelFlowEstimationParams(
         frame1=img,
         frame2=img,
-        prior=prior
+        prior=prior,
+        confidence=confidence,
     )
     estimation: LevelFlowEstimation = level_flow_estimator(params)
     estimation.check_shapes_consistent_with_params(params, patch_size=4, stride=2)

@@ -1,6 +1,5 @@
 import os
 from datetime import datetime
-from typing import Sequence, Any
 
 import flax.nnx as nnx
 import jax
@@ -9,36 +8,38 @@ import optax
 from orbax.checkpoint import StandardCheckpointer
 from tensorboardX import SummaryWriter
 
-from depth.loss.frame_pair_pyramid_loss import frame_pair_pyramid_loss_value_and_grad, \
-    LossTrace
+from depth.loss.frame_pair_pyramid_loss import LossTrace, pyramid_loss
 from depth.model.build import make_model
 from depth.train.build import generate_zero_priors
-from depth.model.pyramid_flow import PyramidFlowEstimator
+from depth.model.pyramid_flow import PyramidFlowEstimator, PyramidFlowEstimationParams
 from depth.model.settings import Settings
 from depth.training.build import make_frame_pyramids_dataset
-from depth.training.log import log_train_progress
+from depth.training.log import log_train_progress, log_model_state, log_grads
 
 
 @nnx.jit
 def train_step(model: PyramidFlowEstimator,
                optimizer: nnx.Optimizer,
-               p1: Sequence[jax.Array],
-               p2: Sequence[jax.Array],
-               priors: jax.Array) -> jax.Array:
-    (loss, _), grads = frame_pair_pyramid_loss_value_and_grad(model, p1, p2, priors)
+               params: PyramidFlowEstimationParams) -> jax.Array:
+    loss, grads = flow_loss(model, params)
     optimizer.update(grads)
     return loss
 
 
+@nnx.value_and_grad
+def flow_loss(model: PyramidFlowEstimator, params: PyramidFlowEstimationParams) -> jax.Array:
+    flow_estimation = model(params)
+    trace = pyramid_loss(flow_estimation)
+    return trace.weighted_loss
+
+
 @nnx.jit
-def trace_step(model: PyramidFlowEstimator,
-               optimizer: nnx.Optimizer,
-               p1: Sequence[jax.Array],
-               p2: Sequence[jax.Array],
-               priors: jax.Array) -> LossTrace:
-    (loss, trace), grads = frame_pair_pyramid_loss_value_and_grad(model, p1, p2, priors)
-    optimizer.update(grads)
-    return trace
+@nnx.value_and_grad(has_aux=True)
+def trace_step(model: PyramidFlowEstimator, params: PyramidFlowEstimationParams
+               ) -> tuple[jax.Array, LossTrace]:
+    flow_estimation = model(params)
+    trace = pyramid_loss(flow_estimation)
+    return trace.weighted_loss, trace
 
 
 class Train:
@@ -76,6 +77,7 @@ class Train:
     def single_level_train_loop(self, levels: int, global_step: int, epochs: int) -> int:
         train_dataset = make_frame_pyramids_dataset(self._settings, levels=levels)
         priors = generate_zero_priors(self._settings.train.batch_size, self._settings.model)
+        confidence = jnp.zeros_like(priors)[:, :, :, :1]
         print(f"Training with  {levels} pyramid levels.")
         print(f"{len(train_dataset)} frame pairs on {self._settings.train.batch_size} size batches "
               f"over {self._settings.train.num_epochs} epochs")
@@ -83,14 +85,21 @@ class Train:
         for epoch in range(epochs):
             print(f"Epoch {epoch}")
             for step, (f1_jax, f2_jax) in enumerate(train_dataset):
-                loss = train_step(self._model, self._optimizer, f1_jax, f2_jax, priors)
+                params = PyramidFlowEstimationParams(
+                    pyramid1=f1_jax,
+                    pyramid2=f2_jax,
+                    prior=priors,
+                    confidence=confidence,
+                )
+                loss = train_step(self._model, self._optimizer, params)
                 if not jnp.isfinite(loss):
                     print(f"Warning: NaN or Inf loss detected at step {step}. Exiting training.")
-                    return
+                    break
                 if global_step % 100 == 0:
-                    trace = trace_step(self._model, self._optimizer, f1_jax, f2_jax, priors)
-                    log_train_progress(self._model, trace, global_step, self._logger,
-                                       self._log_path)
+                    (_, trace), grads = trace_step(self._model, params)
+                    log_train_progress(trace, global_step, self._logger)
+                    log_model_state(self._model, self._log_path)
+                    log_grads(grads, self._log_path)
                 global_step += 1
 
         return global_step
@@ -106,8 +115,11 @@ class Train:
     def _build_spatial_conv_mask(self):
         _, state, _ = nnx.split(self._model, nnx.Param, ...)
 
-        def mask_fn(path, s) -> bool:
-            return path == ('_upsampler', 'spatial_influence_conv', 'kernel')
+        def mask_fn(path, _) -> bool:
+            return path == ('_level_flow_estimator',
+                            '_upsampler',
+                            'spatial_influence_conv',
+                            'kernel')
 
         mapped_state = nnx.map_state(mask_fn, state)
         # ensure we matched at least one time. else we probably renamed the model's convolution.

@@ -25,7 +25,7 @@ def normalized_cross_correlation(patch1, patch2, epsilon=1e-6) -> jax.Array:
 def sum_of_absolute_differences(patch1: jax.Array, patch2: jax.Array) -> jax.Array:
     """Similarity metric between two patches with dimensions C,H,W"""
     H, W, C = patch1.shape
-    pixel_sad = jnp.sum(jnp.abs(patch1 - patch2)) / (C * H * W)
+    pixel_sad = jnp.sum(jnp.abs(patch1 - patch2), axis=(0,1)) / (C * H * W)
     return pixel_sad
 
 

@@ -7,7 +7,7 @@ import jax.numpy as jnp
 from flax import nnx
 from jax.tree_util import register_dataclass
 
-from depth.jax_utils import print_shapes
+from depth.images.upscale import upsample_2n_plus2, upscale_values_2n_plus2
 
 
 @register_dataclass
@@ -32,6 +32,11 @@ class FlowUpsamplerParams:
 class UpsampledFlow:
     upsampled_flow: jax.Array
     fwd_confidence: jax.Array
+
+    def check_shapes_consistent(self):
+        B, H, W, F = self.upsampled_flow.shape
+        assert F == 2
+        assert self.fwd_confidence.shape == (B, H, W, 1)
 
     def check_shapes_consistent_with_params(self, params: FlowUpsamplerParams):
         params.check_consistent_shapes()
@@ -60,6 +65,9 @@ class FlowUpsampler(nnx.Module):
 
     def __call__(self, params: FlowUpsamplerParams) -> UpsampledFlow:
         params.check_consistent_shapes()
+        B, H, W, F = params.net_flow.shape
+        if H <= 2 and W <= 2:
+            return self._simple_upscale(params)
         influence_input = jnp.concatenate(
             [params.residual_flow, params.patch_score, params.match_score, params.confidence],
             axis=-1
@@ -82,15 +90,15 @@ class FlowUpsampler(nnx.Module):
             effective_flow,  # B H W (00 01 10 11) (yx)
             'b h w (p_h p_w) f -> b (h p_h) (w p_w) f', p_h=2, p_w=2
         )
+        upscaled_upsampled_flow = upscale_values_2n_plus2(upsampled_flow)
         padded_upsampled_flow = jnp.pad(
-            upsampled_flow,
+            upscaled_upsampled_flow,
             pad_width=((0, 0), (1, 1), (1, 1), (0, 0)),
             mode='edge'
         )
         forward_confidence = einops.rearrange(
             spatial_influence_norms,  # B H W (00 01 10 11) (yx)
             'b h w (p_h p_w)-> b (h p_h) (w p_w) 1', p_h=2, p_w=2
-
         )
         padded_forward_confidence = jnp.pad(
             forward_confidence,
@@ -103,6 +111,15 @@ class FlowUpsampler(nnx.Module):
         )
         upsampled.check_shapes_consistent_with_params(params)
         return upsampled
+
+    def _simple_upscale(self, params: FlowUpsamplerParams):
+        upsampled = upsample_2n_plus2(params.net_flow)
+        upscaled = upscale_values_2n_plus2(upsampled)
+        confidence = upsample_2n_plus2(params.confidence)
+        return UpsampledFlow(
+            upsampled_flow=upscaled,
+            fwd_confidence=confidence,
+        )
 
 
 def test_upscale_flow():

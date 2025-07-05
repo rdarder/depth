@@ -15,16 +15,13 @@ def patch_flow_loss(patch1: jax.Array, patch2: jax.Array, flow: jax.Array) -> ja
     patch1 halfway in the opposite direction. The difference is evaluated only on the center
     portion of the patches (for a 4x4 patch, the center shifted parts of size 3x3 will be
     compared).
-
-    For multichannel patches, it returns the mean difference across channels.
     """
 
     assert flow.shape == (2,)
     assert patch1.shape == patch2.shape
     patch1_center = shifted_center_patch(patch1, -flow / 2)
     patch2_shifted = shifted_center_patch(patch2, flow / 2)
-    return jnp.mean(sum_of_absolute_differences(patch1_center, patch2_shifted))
-
+    return sum_of_absolute_differences(patch1_center, patch2_shifted)
 
 def test_patch_flow_loss_exact_match():
     canvas = jax.random.normal(jax.random.key(1), (5, 5, 1))
